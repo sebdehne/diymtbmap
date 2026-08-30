@@ -7,7 +7,11 @@ import { test, after } from "node:test";
 import Database from "better-sqlite3";
 import {
   EXPECTED_LAYERS,
+  MTB_PROFILE_VERSION,
   readMtbBounds,
+  readMtbHasBikePark,
+  readMtbProfileVersion,
+  readTilesetView,
   verifyMbtiles,
   verifyMtbMbtiles,
 } from "../src/verify.js";
@@ -236,6 +240,10 @@ interface MakeMtbOpts {
   layers?: readonly string[];
   /** null omits the mtb_scale field from the declaration. */
   mtbFields?: Record<string, string> | null;
+  /** The `mtb_profile_version` metadata; null omits it (a v1 tileset). */
+  profileVersion?: string | null;
+  /** The `center` metadata ("lon,lat,zoom"); null omits it. */
+  center?: string | null;
   bounds?: string | null;
   /** Per-zoom mtb_scale value (default "4" at every zoom). */
   scaleAt?: Partial<Record<number, string>>;
@@ -291,6 +299,12 @@ function makeMtbMbtiles(file: string, opts: MakeMtbOpts = {}): void {
   meta.run("minzoom", opts.minzoom ?? "7");
   meta.run("maxzoom", opts.maxzoom ?? "14");
   if (opts.mtbMinzoom !== null) meta.run("mtb_minzoom", opts.mtbMinzoom ?? (opts.minzoom ?? "7"));
+  if (opts.profileVersion !== null && opts.profileVersion !== undefined) {
+    meta.run("mtb_profile_version", opts.profileVersion);
+  }
+  if (opts.center !== null && opts.center !== undefined) {
+    meta.run("center", opts.center ?? "-179.98,85.055,11");
+  }
   if (opts.bounds !== null) {
     meta.run("bounds", opts.bounds ?? "-179.99,85.05,-179.97,85.06");
   }
@@ -435,4 +449,65 @@ test("readMtbBounds: returns the bounds metadata, or null when absent", () => {
   const noBounds = join(dir, "bounds-none.mbtiles");
   makeMtbMbtiles(noBounds, { bounds: null });
   assert.equal(readMtbBounds(noBounds), null);
+});
+
+// ---------------------------------------------------------------------------
+// Workstream C: profile version + bike-park detection
+// ---------------------------------------------------------------------------
+
+test("MTB_PROFILE_VERSION: this app expects profile v2", () => {
+  assert.equal(MTB_PROFILE_VERSION, "2");
+});
+
+test("readMtbProfileVersion: returns the recorded version, or null for v1", () => {
+  const v2 = join(dir, "profile-v2.mbtiles");
+  makeMtbMbtiles(v2, { profileVersion: "2" });
+  assert.equal(readMtbProfileVersion(v2), "2");
+  const v1 = join(dir, "profile-v1.mbtiles");
+  makeMtbMbtiles(v1, { profileVersion: null });
+  assert.equal(readMtbProfileVersion(v1), null);
+});
+
+test("readMtbHasBikePark: true when the mtb layer declares mtb_imba", () => {
+  const withImba = join(dir, "has-imba.mbtiles");
+  makeMtbMbtiles(withImba, { mtbFields: { mtb_scale: "string", mtb_imba: "string" } });
+  assert.equal(readMtbHasBikePark(withImba), true);
+  const noImba = join(dir, "no-imba.mbtiles");
+  makeMtbMbtiles(noImba);
+  assert.equal(readMtbHasBikePark(noImba), false);
+});
+
+test("verifyMtbMbtiles: reports profileVersion + hasBikePark", () => {
+  const v2 = join(dir, "mtb-v2-bikepark.mbtiles");
+  makeMtbMbtiles(v2, {
+    profileVersion: "2",
+    mtbFields: { mtb_scale: "string", mtb_imba: "string", mtb_kind: "string" },
+  });
+  const v = verifyMtbMbtiles(v2, 7);
+  assert.equal(v.profileVersion, "2");
+  assert.equal(v.hasBikePark, true);
+
+  const v1 = join(dir, "mtb-v1-natural.mbtiles");
+  makeMtbMbtiles(v1); // no mtb_profile_version, no mtb_imba field
+  const v1res = verifyMtbMbtiles(v1, 7);
+  assert.equal(v1res.profileVersion, null);
+  assert.equal(v1res.hasBikePark, false);
+});
+
+test("readTilesetView: returns bounds + center, each null when absent", () => {
+  const both = join(dir, "view-both.mbtiles");
+  makeMtbMbtiles(both, { center: "10.0,60.0,6" });
+  assert.deepEqual(readTilesetView(both), {
+    bounds: [-179.99, 85.05, -179.97, 85.06],
+    center: [10, 60, 6],
+  });
+  const noCenter = join(dir, "view-nocenter.mbtiles");
+  makeMtbMbtiles(noCenter, { center: null });
+  assert.deepEqual(readTilesetView(noCenter), {
+    bounds: [-179.99, 85.05, -179.97, 85.06],
+    center: null,
+  });
+  const noBounds = join(dir, "view-nobounds.mbtiles");
+  makeMtbMbtiles(noBounds, { bounds: null });
+  assert.deepEqual(readTilesetView(noBounds), { bounds: null, center: null });
 });

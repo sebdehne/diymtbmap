@@ -1,11 +1,12 @@
 import { createRoot } from "react-dom/client";
-import InfoPanel from "./InfoPanel.jsx";
+import OverlaySwitcher from "./OverlaySwitcher.jsx";
 
-// MapLibre custom control hosting the React info panel (MTB difficulty
-// legend + data sources + data date). Collapsed to a round "i" icon by
-// default. The `status` snapshot (country, data date, hasBikePark) is
-// captured at control-add time and passed to the panel.
-export function makeInfoControl(status) {
+// MapLibre custom control hosting the React overlay switcher (the natural /
+// bike-park trail toggles). Collapsed to a round layers icon by default; one
+// click opens the choose-overlays panel — the same pattern as the info panel
+// with the legends. MapView adds it to the top-right stack right after the
+// fullscreen control, so the icon sits directly under it.
+export function makeOverlayControl(map) {
   let root = null;
   let container = null;
   return {
@@ -13,7 +14,7 @@ export function makeInfoControl(status) {
       container = document.createElement("div");
       container.className = "maplibregl-ctrl";
       root = createRoot(container);
-      root.render(<InfoPanel status={status ?? null}/>);
+      root.render(<OverlaySwitcher map={map} />);
       return container;
     },
     // MapLibre calls onRemove(map) — the arg is the Map, not a DOM node.

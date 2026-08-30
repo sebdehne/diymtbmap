@@ -48,6 +48,20 @@ export const MTB_OVERLAY_ATTR = "mtb_scale";
 /** MBTiles metadata key recording the build-time MTB_MINZOOM (stale detection). */
 export const MTB_MINZOOM_META = "mtb_minzoom";
 
+/**
+ * The mtb-profile schema version this app expects (workstream C). Profile v1
+ * emitted only natural trails (mtb:scale) as `mtb_scale`; v2 splits natural
+ * (mtb:scale) from bike-park (mtb:scale:imba) trails and adds the `mtb_kind`
+ * discriminator + popover attributes. A tileset built by an older profile
+ * still serves natural trails (the overlay filter back-compat handles it); it
+ * just has no bike-park data, so a version < 2 is a warning, not a failure.
+ */
+export const MTB_PROFILE_VERSION = "2";
+/** MBTiles metadata key recording the profile version that built the tileset. */
+export const MTB_PROFILE_VERSION_META = "mtb_profile_version";
+/** The attribute that marks a bike-park trail (present when any is emitted). */
+export const MTB_IMBA_ATTR = "mtb_imba";
+
 /** The tileset must cover at least z0–z14 (the style + overlay are built for it). */
 export const REQUIRED_MAXZOOM = 14;
 
@@ -323,6 +337,69 @@ export function readMtbBounds(file: string): [number, number, number, number] | 
   }
 }
 
+/**
+ * The mtb-profile version that built the tileset (`mtb_profile_version`
+ * metadata), or null when the file has no such metadata (e.g. a v1 tileset).
+ * Cheap metadata-only read; the pipeline compares it to MTB_PROFILE_VERSION
+ * to warn (not fail) when a rebuild would add bike-park trails.
+ */
+export function readMtbProfileVersion(file: string): string | null {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const row = db
+      .prepare("SELECT value FROM metadata WHERE name = ?")
+      .get(MTB_PROFILE_VERSION_META) as { value: string } | undefined;
+    return row?.value ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Whether the tileset carries bike-park trails (workstream C): true when the
+ * `mtb` layer declares the `mtb_imba` field — i.e. at least one bike-park way
+ * (mtb:scale:imba) was emitted. False for v1 tilesets (no such field) and for
+ * extracts without bike-park tagging. Cheap metadata-only read.
+ */
+export function readMtbHasBikePark(file: string): boolean {
+  const fields = readDeclaredFields(file);
+  return (fields.get(MTB_OVERLAY_LAYER) ?? []).includes(MTB_IMBA_ATTR);
+}
+
+export interface TilesetView {
+  bounds: [number, number, number, number] | null;
+  center: [number, number, number] | null;
+}
+
+/**
+ * The tileset's view (workstream D): its `bounds` ("west,south,east,north")
+ * and `center` ("lon,lat,zoom") metadata, each null when absent/invalid.
+ * Cheap metadata-only read; the pipeline reports it so the UI can open the
+ * map on the extract's own extent/center instead of a hardcoded Norway view.
+ */
+export function readTilesetView(file: string): TilesetView {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const bounds = readMetaValue(db, "bounds");
+    const center = readMetaValue(db, "center");
+    return { bounds: parseBounds(bounds), center: parseCenter(center) };
+  } finally {
+    db.close();
+  }
+}
+
+function readMetaValue(db: Database.Database, name: string): string | undefined {
+  const row = db.prepare("SELECT value FROM metadata WHERE name = ?").get(name) as { value: string } | undefined;
+  return row?.value;
+}
+
+function parseCenter(raw: string | undefined): [number, number, number] | null {
+  if (raw === undefined) return null;
+  const parts = raw.split(",").map((p) => Number.parseFloat(p.trim()));
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return null;
+  return [parts[0]!, parts[1]!, parts[2]!];
+}
+
 export interface MtbTilesetResult {
   format: string;
   minzoom: number;
@@ -334,6 +411,10 @@ export interface MtbTilesetResult {
   /** One hit per gate zoom (the minzoom and z14), guaranteed on success. */
   hits: MtbHit[];
   tilesScanned: number;
+  /** The mtb-profile version that built the tileset (null for v1). */
+  profileVersion: string | null;
+  /** True when the tileset carries bike-park trails (mtb_imba field present). */
+  hasBikePark: boolean;
 }
 
 /**
@@ -463,6 +544,8 @@ export function verifyMtbMbtiles(
       zooms,
       hits,
       tilesScanned: scanned.value,
+      profileVersion: meta.get(MTB_PROFILE_VERSION_META) ?? null,
+      hasBikePark: fields !== null && MTB_IMBA_ATTR in fields,
     };
   } finally {
     db.close();

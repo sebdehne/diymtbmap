@@ -40,20 +40,33 @@ a { color: #1565c0; }
 }
 
 /* Info panel (MTB difficulty legend + data sources). Collapsed by default:
-   a round "i" icon, so it costs almost no space on mobile until opened. */
+   a round "i" icon, so it costs almost no space on mobile until opened.
+   Collapsed it must measure exactly 29px — the MapLibre control-button size
+   (27px icon + 1px border each side) — to line up with the other controls.
+   The body is an absolutely-positioned popover ABOVE the icon (the control
+   lives in the bottom-right corner, anchored at the map bottom), so the
+   control box never grows: the icon stays put and one tap both opens and
+   closes the panel without moving the mouse. */
 .mtb-info {
-  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 8px;
+  position: relative;
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 4px;
   font-family: inherit; font-size: .72rem;
-  box-shadow: 0 1px 4px rgba(0,0,0,.15); max-width: 235px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
 }
 .mtb-info-toggle {
-  display: block; width: 36px; height: 36px; margin: 3px;
+  display: block; width: 27px; height: 27px; margin: 0;
   background: transparent; border: 0; border-radius: 50%;
-  font-size: 1.1rem; line-height: 1; color: #222; cursor: pointer;
+  font-size: .95rem; line-height: 1; color: #222; cursor: pointer;
 }
 .mtb-info-toggle:hover { background: rgba(0,0,0,.06); }
-.mtb-info.open .mtb-info-toggle { border-bottom: 1px solid #e8e4da; border-radius: 50% 50% 0 0; }
-.mtb-info-body { padding: .1rem .7rem .55rem; }
+.mtb-info.open .mtb-info-toggle { background: rgba(0,0,0,.08); }
+.mtb-info-body {
+  position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 1;
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+  width: max-content; max-width: 235px;
+  padding: .5rem .7rem;
+}
 .mtb-info-title { font-weight: 600; margin-bottom: .35rem; }
 .mtb-legend-row { display: flex; align-items: center; gap: .4rem; padding: .08rem 0; }
 .mtb-swatch { width: 18px; height: 9px; border-radius: 2px; flex: none; border: 1px solid rgba(0,0,0,.25); }
@@ -70,3 +83,67 @@ a { color: #1565c0; }
   padding: .3rem .7rem; font-size: .75rem; font-variant-numeric: tabular-nums;
   box-shadow: 0 1px 4px rgba(0,0,0,.15);
 }
+
+/* Overlay switcher (natural vs bike-park), a MapLibre control right under
+   the fullscreen button. Collapsed by default: a round layers icon, so it
+   costs almost no space until opened (same pattern as .mtb-info). Collapsed
+   it measures exactly 29px (27px icon + 1px border each side), the MapLibre
+   control-button size, so it aligns with the fullscreen button above it.
+   The body is an absolutely-positioned popover BELOW the icon (the control
+   lives in the top-right corner, anchored at the map top), so the control
+   box never grows: the icon stays put and one tap both opens and closes
+   the panel without moving the mouse. */
+.mtb-overlay {
+  position: relative;
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 4px;
+  font-family: inherit; font-size: .72rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+}
+.mtb-overlay-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 27px; height: 27px; margin: 0;
+  background: transparent; border: 0; border-radius: 50%;
+  color: #222; cursor: pointer;
+}
+.mtb-overlay-toggle:hover { background: rgba(0,0,0,.06); }
+.mtb-overlay.open .mtb-overlay-toggle { background: rgba(0,0,0,.08); }
+.mtb-overlay-body {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 1;
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+  width: max-content; max-width: 235px;
+  padding: .5rem .7rem;
+}
+.mtb-overlay-title {
+  font-weight: 600; font-variant: small-caps; letter-spacing: .04em;
+  margin-bottom: .35rem; color: #444;
+}
+.overlay-row {
+  display: flex; align-items: center; gap: .5rem; padding: .18rem 0;
+  cursor: pointer; user-select: none;
+}
+.overlay-row input { accent-color: #43a047; margin: 0; width: 15px; height: 15px; cursor: pointer; }
+.overlay-swatch { width: 18px; height: 9px; border-radius: 2px; flex: none; border: 1px solid rgba(0,0,0,.25); }
+.overlay-label { color: #333; }
+/* One block per trail group: the checkbox row + its opacity slider. */
+.overlay-group { margin-bottom: .3rem; }
+.overlay-group:last-child { margin-bottom: 0; }
+/* The opacity row indents under the label; dimmed + inert while the group is
+   switched off (the slider is disabled) so it reads as "not in effect". */
+.overlay-opacity {
+  display: flex; align-items: center; gap: .45rem;
+  padding: .1rem 0 .1rem 1.35rem;
+}
+.overlay-opacity.off { opacity: .4; }
+.overlay-opacity-slider {
+  flex: 1; margin: 0; accent-color: #43a047; cursor: pointer;
+  height: 14px;
+}
+.overlay-opacity-slider:disabled { cursor: default; }
+.overlay-opacity-value {
+  font-variant-numeric: tabular-nums; color: #666; width: 3ch; text-align: right;
+}
+
+/* Info panel: per-group legend block + data date. */
+.mtb-legend { margin-bottom: .5rem; }
+.mtb-info-date { margin-top: .2rem; color: #666; font-size: .7rem; }

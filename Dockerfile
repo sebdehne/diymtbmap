@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1
 #
 # Single multi-process toolchain image for the Norway MTB map.
-# Node 20 (LTS "Iron") on Debian bookworm + Temurin JRE 21 + Martin 1.14.
+# Node 26 on Debian bookworm + Temurin JRE 21 + Martin 1.14.
 # All versions are pinned for reproducible builds.
 #
 # Pinned upstream / apt versions:
-#   node            20.20.2   (base image)
+#   node            26.8.1   (base image)
 #   curl            7.88.1-10+deb12u15
-#   ca-certificates 20230311+deb12u1
-#   unzip           6.0-28
+#   ca-certificates 20250419~deb12u1
+#   unzip           6.0-28+deb12u1
 #   martin          1.14.0    (static musl binary, SHA256-pinned)
 #   jre             Temurin 21.0.9+10 (eclipse-temurin:21.0.9_10-jre-jammy)
 #   tileset profile openmaptiles/planetiler-openmaptiles v3.16 release jar
@@ -28,7 +28,7 @@
 # react) out of the runtime image: npm ci -> tsc + vite build -> prune dev
 # deps. react / react-dom / maplibre-gl are devDependencies on purpose — Vite
 # bundles them into public/assets, so the runtime never needs them.
-FROM node:20.20.2-bookworm AS build
+FROM node:26.8.1-bookworm AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -82,7 +82,7 @@ RUN mvn -B -ntp package \
 # --- Stage: the Temurin JRE 21 (exact version tag, multi-arch) --------------
 FROM eclipse-temurin:21.0.9_10-jre-jammy AS jre
 
-FROM node:20.20.2-bookworm
+FROM node:26.8.1-bookworm
 
 # Step 11 (decision B1): the MTB overlay tileset's start zoom. Build-time by
 # design — it is baked into the tile data (which tiles exist), so changing it
@@ -93,8 +93,8 @@ ARG MTB_MINZOOM=3
 
 ARG TARGETARCH
 ARG CURL_VERSION=7.88.1-10+deb12u15
-ARG CA_CERTS_VERSION=20230311+deb12u1
-ARG UNZIP_VERSION=6.0-28
+ARG CA_CERTS_VERSION=20250419~deb12u1
+ARG UNZIP_VERSION=6.0-28+deb12u1
 ARG MARTIN_VERSION=1.14.0
 # Static musl builds (portable; no glibc/libuv dependency on the host distro).
 # SHA256 values verified against the downloaded release assets.

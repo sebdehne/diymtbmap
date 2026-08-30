@@ -14,6 +14,7 @@ import {
   REQUIRED_MAXZOOM,
   readDeclaredFields,
   readMtbBounds,
+  readTilesetView,
   type MtbHit,
 } from "./verify.js";
 
@@ -441,36 +442,59 @@ function maybeGunzip(data: Uint8Array): Uint8Array {
   return isGzip(data) ? new Uint8Array(gunzipSync(Buffer.from(data))) : data;
 }
 
+/** Slippy-map tile for a lon/lat at a zoom (clamped to the valid grid). */
+function tileForLonLat(lon: number, lat: number, zoom: number): [number, number, number] {
+  const n = 2 ** zoom;
+  const x = Math.max(0, Math.min(n - 1, Math.floor(((lon + 180) / 360) * n)));
+  const clamped = Math.max(-85.05, Math.min(85.05, lat));
+  const latRad = (clamped * Math.PI) / 180;
+  const y = Math.max(
+    0,
+    Math.min(n - 1, Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n)),
+  );
+  return [zoom, x, y];
+}
+
 /**
- * Low-zoom tiles (world coverage) plus a couple of mid-zoom tiles around
- * Norway — enough that at least one real extract will return features.
+ * Candidate tiles for the smoke test, independent of the country: low-zoom
+ * world tiles guarantee at least one decodable tile with features for ANY
+ * extract, and (when the tileset records a center) a couple of mid-zoom tiles
+ * around that center give a representative, feature-rich sample.
  */
-const SMOKE_CANDIDATES: [number, number, number][] = [
-  [1, 0, 0],
-  [1, 1, 0],
-  [1, 0, 1],
-  [1, 1, 1],
-  [2, 1, 1],
-  [2, 2, 1],
-  [2, 1, 2],
-  [2, 2, 2],
-  [3, 2, 2],
-  [3, 3, 3],
-  [3, 5, 3],
-  [4, 5, 3],
-  [4, 9, 5],
-  [6, 33, 18],
-  [7, 66, 37],
-];
+function smokeCandidates(center: [number, number, number] | null): [number, number, number][] {
+  const candidates: [number, number, number][] = [
+    [1, 0, 0],
+    [1, 1, 0],
+    [1, 0, 1],
+    [1, 1, 1],
+    [2, 1, 1],
+    [2, 2, 1],
+    [2, 1, 2],
+    [2, 2, 2],
+    [3, 2, 2],
+    [3, 3, 3],
+  ];
+  if (center !== null) {
+    const [lon, lat, zoom] = center;
+    const z = Math.max(3, Math.min(7, Math.round(zoom) || 5));
+    candidates.push(tileForLonLat(lon, lat, z), tileForLonLat(lon, lat, Math.max(3, z - 1)));
+  }
+  return candidates;
+}
 
 /**
  * Proves the full serving chain end-to-end: fetches real tiles from the tile
  * server over HTTP and decodes them as MVT. Prefers the first tile with
  * features; falls back to any decodable tile; throws if none decode.
  */
-export async function renderSmokeTest(tileBaseUrl: string, source: string): Promise<SmokeResult> {
+export async function renderSmokeTest(
+  tileBaseUrl: string,
+  source: string,
+  center: [number, number, number] | null = null,
+): Promise<SmokeResult> {
+  const candidates = smokeCandidates(center);
   let lastDecoded: SmokeResult | null = null;
-  for (const [z, x, y] of SMOKE_CANDIDATES) {
+  for (const [z, x, y] of candidates) {
     const url = `${tileBaseUrl}/${source}/${z}/${x}/${y}`;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
@@ -489,9 +513,7 @@ export async function renderSmokeTest(tileBaseUrl: string, source: string): Prom
   }
   if (lastDecoded !== null) return lastDecoded;
   throw new Error(
-    `render smoke test failed: no decodable ${source} tile among z${SMOKE_CANDIDATES.map(
-      ([z]) => z,
-    ).join(",z")} — the tile server is not serving valid MVT`,
+    `render smoke test failed: no decodable ${source} tile among ${candidates.length} candidates — the tile server is not serving valid MVT`,
   );
 }
 
@@ -531,7 +553,8 @@ export async function verifyStyleServing(cfg: Config, martinUrl: string): Promis
   }
   for (const w of result.fieldWarnings) log(`warning: ${w}`);
 
-  const smoke = await renderSmokeTest(martinUrl, EXPECTED_SOURCE);
+  const smokeCenter = readTilesetView(cfg.mbtilesFile).center;
+  const smoke = await renderSmokeTest(martinUrl, EXPECTED_SOURCE, smokeCenter);
   log(
     `basemap style OK: ${analysis.sourceLayers.length} source-layers, ${analysis.allFields.size} ` +
       `fields referenced (${result.fieldWarnings.length} field warning(s)); smoke tile ${smoke.url} ` +

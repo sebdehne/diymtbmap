@@ -44,10 +44,51 @@ const maplibreWorkerPlugin = {
 
 const BACKEND = "http://localhost:8080";
 
+// Dev-server middlewares that must run BEFORE Vite's own stack (dep-optimizer +
+// SPA fallback) so they win the race to serve files Vite doesn't know about.
+// `configureServer` is a PLUGIN hook — nested under the `server` key (as it was
+// before) it is silently ignored by Vite, which is exactly why the worker
+// request fell through to the dep-optimizer and 500'd with "The file does not
+// exist at … which is in the optimize deps directory".
+const devServerPlugin = {
+  name: "maplibre-dev-server",
+  configureServer(server) {
+    // MapLibre worker + shared chunk (see header note): in dev,
+    // import.meta.url points at Vite's optimized-deps copy of maplibre, so
+    // ./maplibre-gl-{worker,shared}.mjs 404 there too — serve the real
+    // files for any such request.
+    server.middlewares.use((req, res, next) => {
+      const m = (req.url ?? "").match(/\/(maplibre-gl-(?:worker|shared)\.mjs)(?:\?|$)/);
+      if (req.method === "GET" && m) {
+        res.setHeader("content-type", "text/javascript");
+        fs.createReadStream(require.resolve(`maplibre-gl/dist/${m[1]}`)).pipe(res);
+        return;
+      }
+      next();
+    });
+    // Glyph fonts are a catch-all route: /<fontstack>/<range>.pbf
+    // (e.g. /Open%20Sans%20Regular/0-255.pbf) — proxy those to the app too.
+    server.middlewares.use((req, res, next) => {
+      if (req.method !== "GET" || !/^\/[^/]+\/\d+-\d+\.pbf$/.test(req.url ?? "")) {
+        next();
+        return;
+      }
+      const upstream = http.get({ host: "localhost", port: 8080, path: req.url }, (up) => {
+        res.writeHead(up.statusCode ?? 502, up.headers);
+        up.pipe(res);
+      });
+      upstream.on("error", () => {
+        if (!res.headersSent) res.writeHead(502, {});
+        res.end("502 — app backend (localhost:8080) unreachable");
+      });
+    });
+  },
+};
+
 export default defineConfig({
   root: "web",
   base: "./",
-  plugins: [react(), maplibreWorkerPlugin],
+  plugins: [react(), maplibreWorkerPlugin, devServerPlugin],
   server: {
     // `npm run dev:web` = HMR loop; the app (container or `npm run dev`) on
     // :8080 is the backend — everything the UI fetches is proxied to it.
@@ -59,37 +100,6 @@ export default defineConfig({
       "/sprite.png": BACKEND,
       "/sprite@2x.json": BACKEND,
       "/sprite@2x.png": BACKEND,
-    },
-    configureServer(server) {
-      // MapLibre worker + shared chunk (see header note): in dev,
-      // import.meta.url points at Vite's optimized-deps copy of maplibre, so
-      // ./maplibre-gl-{worker,shared}.mjs 404 there too — serve the real
-      // files for any such request.
-      server.middlewares.use((req, res, next) => {
-        const m = (req.url ?? "").match(/\/(maplibre-gl-(?:worker|shared)\.mjs)(?:\?|$)/);
-        if (req.method === "GET" && m) {
-          res.setHeader("content-type", "text/javascript");
-          fs.createReadStream(require.resolve(`maplibre-gl/dist/${m[1]}`)).pipe(res);
-          return;
-        }
-        next();
-      });
-      // Glyph fonts are a catch-all route: /<fontstack>/<range>.pbf
-      // (e.g. /Open%20Sans%20Regular/0-255.pbf) — proxy those to the app too.
-      server.middlewares.use((req, res, next) => {
-        if (req.method !== "GET" || !/^\/[^/]+\/\d+-\d+\.pbf$/.test(req.url ?? "")) {
-          next();
-          return;
-        }
-        const upstream = http.get({ host: "localhost", port: 8080, path: req.url }, (up) => {
-          res.writeHead(up.statusCode ?? 502, up.headers);
-          up.pipe(res);
-        });
-        upstream.on("error", () => {
-          if (!res.headersSent) res.writeHead(502, {});
-          res.end("502 — app backend (localhost:8080) unreachable");
-        });
-      });
     },
   },
   build: { outDir: "../public", emptyOutDir: false },

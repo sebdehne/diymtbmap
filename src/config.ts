@@ -5,6 +5,12 @@ export interface Config {
   port: number;
   publicDir: string;
   dataDir: string;
+  /**
+   * Display name of the country the extract covers (workstream D): used for
+   * the progress card title and the info panel. Defaults to "Norway" to keep
+   * the historical branding; set COUNTRY_NAME to rebrand for another extract.
+   */
+  countryName: string;
   osmUrl: string;
   osmFile: string;
   mbtilesFile: string;
@@ -91,6 +97,7 @@ export function loadConfig(): Config {
     port: envInt("PORT", 8080),
     publicDir: path.join(appRoot, "public"),
     dataDir,
+    countryName: process.env.COUNTRY_NAME ?? "Norway",
     osmUrl:
       process.env.OSM_URL ??
       "https://download.geofabrik.de/europe/norway-latest.osm.pbf",

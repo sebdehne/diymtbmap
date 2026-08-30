@@ -8,4 +8,5 @@ export const DATA_SOURCES = [
   },
   { name: "Geofabrik", note: "OSM extract", url: "https://www.geofabrik.de/" },
   { name: "OpenMapTiles", note: "basemap style", url: "https://www.openmaptiles.org/" },
+  { name: "Source", note: "Source code of this app", url: "https://github.com/sebdehne/diymtbmap" },
 ];

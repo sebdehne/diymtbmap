@@ -17,9 +17,10 @@ export default function ProgressCard({ status, fetchError }) {
       ? status.message + (status.elapsed !== undefined ? `  (${status.elapsed}s elapsed)` : "")
       : "Connecting…";
 
+  const country = status?.name ?? "Norway";
   return (
     <div className="card">
-      <h1>Norway MTB Map</h1>
+      <h1>{country} MTB Map</h1>
       <div className="state">{state ? (STATE_LABELS[state] ?? state) : "…"}</div>
       <div className="bar">
         <div style={{ width: pct + "%" }} />

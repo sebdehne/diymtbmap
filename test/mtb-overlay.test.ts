@@ -2,14 +2,26 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  BIKEPARK_FILTER,
+  DEFAULT_BOUNDS,
+  IMBA_COLORS,
+  IMBA_FALLBACK_COLOR,
+  IMBA_LABELS,
   MTB_CASING_COLOR,
   MTB_COLORS,
   MTB_FALLBACK_COLOR,
   MTB_LABELS,
+  MTB_LINE_OPACITY,
   MTB_MINZOOM,
   MTB_SOURCE,
   MTB_SOURCE_LAYER,
-  NORWAY_BOUNDS,
+  NATURAL_FILTER,
+  OVERLAY_GROUPS,
+  applyOverlayOpacity,
+  applyOverlayVisibility,
+  bikeParkColorEntries,
+  bikeParkColorExpression,
+  bikeParkOverlayLayers,
   mtbColorEntries,
   mtbColorExpression,
   mtbOverlayLayers,
@@ -104,7 +116,7 @@ test("mtbOverlayLayers: casing + colored line, correct source/filter/minzoom", (
     assert.equal(layer.source, MTB_SOURCE);
     assert.equal(layer["source-layer"], MTB_SOURCE_LAYER);
     assert.equal(layer.minzoom, MTB_MINZOOM);
-    assert.deepEqual(layer.filter, ["has", "mtb_scale"]);
+    assert.deepEqual(layer.filter, NATURAL_FILTER);
     assert.deepEqual(layer.layout, { "line-cap": "round", "line-join": "round" });
   }
 
@@ -128,17 +140,27 @@ test("mtbOverlayLayers: casing + colored line, correct source/filter/minzoom", (
   }
 });
 
-test("step 11: line widths are thin at the minzoom floor, rising to 7px @ z18; casing = 2x", () => {
+test("step 11: line widths are thin at the minzoom floor, rising to 3.5px @ z18; casing = 2x", () => {
   const [, line] = mtbOverlayLayers();
   const stops = widthStops(line?.paint["line-width"]);
   assert.deepEqual([...stops.keys()].sort((a, b) => a - b), [MTB_MINZOOM, 11, 18], "stops: minzoom, z11, z18");
-  assert.equal(stops.get(MTB_MINZOOM), 0.75, "0.75 px at the minzoom floor");
-  assert.equal(stops.get(11), 1.5, "1.5 px @ z11");
-  assert.equal(stops.get(18), 7, "7 px @ z18");
+  assert.equal(stops.get(MTB_MINZOOM), 0.375, "0.375 px at the minzoom floor");
+  assert.equal(stops.get(11), 0.75, "0.75 px @ z11");
+  assert.equal(stops.get(18), 3.5, "3.5 px @ z18");
   const casing = widthStops(mtbOverlayLayers()[0]?.paint["line-width"]);
   for (const [zoom, w] of stops) {
     assert.equal(casing.get(zoom), 2 * w, `casing is exactly 2x the line at z${zoom}`);
   }
+});
+
+test("mtbOverlayLayers: both layers render at half opacity", () => {
+  const [casing, line] = mtbOverlayLayers();
+  assert.equal(MTB_LINE_OPACITY, 0.5);
+  assert.equal(casing?.paint["line-opacity"], MTB_LINE_OPACITY);
+  assert.equal(line?.paint["line-opacity"], MTB_LINE_OPACITY);
+  const [bpCasing, bpLine] = bikeParkOverlayLayers();
+  assert.equal(bpCasing?.paint["line-opacity"], MTB_LINE_OPACITY);
+  assert.equal(bpLine?.paint["line-opacity"], MTB_LINE_OPACITY);
 });
 
 test("step 11: mtbOverlayLayers honors a custom source + minzoom (from the status snapshot)", () => {
@@ -150,7 +172,242 @@ test("step 11: mtbOverlayLayers honors a custom source + minzoom (from the statu
   assert.equal(line?.["source-layer"], MTB_SOURCE_LAYER, "the layer id stays 'mtb'");
   const stops = widthStops(line?.paint["line-width"]);
   assert.ok(stops.has(5), "the low-zoom width stop follows the minzoom");
-  assert.equal(stops.get(5), 0.75);
+  assert.equal(stops.get(5), 0.375);
+});
+
+// ---------------------------------------------------------------------------
+// Bike-park group (mtb:scale:imba), levels 0–4
+// ---------------------------------------------------------------------------
+
+const IMBA_RAMP: Record<string, string> = {
+  "0": "#009c3b",
+  "1": "#2f7fe0",
+  "2": "#e8281c",
+  "3": "#1a1a1a",
+  "4": "#8e44ad",
+};
+
+test("IMBA_COLORS: exactly the 5-level IMBA ramp (0–4)", () => {
+  assert.deepEqual(Object.keys(IMBA_COLORS).sort(), ["0", "1", "2", "3", "4"]);
+  for (const [level, color] of Object.entries(IMBA_RAMP)) {
+    assert.equal(IMBA_COLORS[level], color, `IMBA level ${level} color`);
+  }
+});
+
+test("IMBA_LABELS: one legend label per IMBA level", () => {
+  assert.deepEqual(Object.keys(IMBA_LABELS).sort(), ["0", "1", "2", "3", "4"]);
+  for (const label of Object.values(IMBA_LABELS)) {
+    assert.ok(typeof label === "string" && label.length > 0);
+  }
+});
+
+test("bikeParkColorEntries: covers every IMBA level 0–4", () => {
+  const entries = bikeParkColorEntries();
+  assert.equal(entries.length, 5, "5 levels");
+  const map = new Map(entries);
+  for (const [level, color] of Object.entries(IMBA_RAMP)) {
+    assert.equal(map.get(level), color);
+  }
+});
+
+test("bikeParkColorExpression: match on raw mtb_imba, all levels + fallback", () => {
+  const expr = bikeParkColorExpression();
+  assert.equal(expr[0], "match");
+  assert.deepEqual(expr[1], ["get", "mtb_imba"]);
+  assert.equal(expr[expr.length - 1], IMBA_FALLBACK_COLOR, "fallback is the final entry");
+  const labels = [];
+  for (let i = 2; i < expr.length - 1; i += 2) labels.push(expr[i]);
+  assert.deepEqual(labels.sort(), ["0", "1", "2", "3", "4"]);
+  for (let i = 3; i < expr.length - 1; i += 2) assert.match(expr[i], /^#[0-9a-f]{6}$/i);
+});
+
+test("bikeParkOverlayLayers: casing + colored line, bikepark filter + imba color", () => {
+  const layers = bikeParkOverlayLayers();
+  assert.equal(layers.length, 2);
+  const [casing, line] = layers;
+  assert.equal(casing?.id, "bikepark-casing");
+  assert.equal(line?.id, "bikepark-imba");
+  for (const layer of [casing, line]) {
+    assert.ok(layer, "layer present");
+    assert.equal(layer.type, "line");
+    assert.equal(layer.source, MTB_SOURCE);
+    assert.equal(layer["source-layer"], MTB_SOURCE_LAYER);
+    assert.equal(layer.minzoom, MTB_MINZOOM);
+    assert.deepEqual(layer.filter, BIKEPARK_FILTER);
+    assert.deepEqual(layer.layout, { "line-cap": "round", "line-join": "round" });
+  }
+  assert.equal(casing?.paint["line-color"], MTB_CASING_COLOR);
+  assert.deepEqual(line?.paint["line-color"], bikeParkColorExpression());
+  // Casing is strictly wider than the line at every shared zoom stop.
+  const cStops = widthStops(casing?.paint["line-width"]);
+  const lStops = widthStops(line?.paint["line-width"]);
+  assert.deepEqual([...cStops.keys()], [...lStops.keys()], "same zoom stops");
+  for (const [zoom, lineWidth] of lStops) {
+    const casingWidth = cStops.get(zoom);
+    assert.ok(casingWidth !== undefined && casingWidth > lineWidth, `casing > line at z${zoom}`);
+    assert.ok(lineWidth > 0);
+  }
+});
+
+test("bikeParkOverlayLayers honors a custom source + minzoom", () => {
+  const [casing, line] = bikeParkOverlayLayers("mtb-9", 6);
+  assert.equal(casing?.source, "mtb-9");
+  assert.equal(line?.source, "mtb-9");
+  assert.equal(casing?.minzoom, 6);
+  assert.equal(line?.minzoom, 6);
+  assert.equal(line?.["source-layer"], MTB_SOURCE_LAYER);
+});
+
+// ---------------------------------------------------------------------------
+// Filters partition the trail groups (natural vs bike-park)
+// ---------------------------------------------------------------------------
+
+test("NATURAL_FILTER: defaults a missing mtb_kind to natural (back-compat)", () => {
+  assert.deepEqual(NATURAL_FILTER, ["!=", ["coalesce", ["get", "mtb_kind"], "natural"], "bikepark"]);
+});
+
+test("BIKEPARK_FILTER: only ways explicitly tagged bike-park", () => {
+  assert.deepEqual(BIKEPARK_FILTER, ["==", ["get", "mtb_kind"], "bikepark"]);
+});
+
+// ---------------------------------------------------------------------------
+// OVERLAY_GROUPS drives the UI toggles + legends
+// ---------------------------------------------------------------------------
+
+test("OVERLAY_GROUPS: natural + bikepark, with matching layer ids", () => {
+  assert.equal(OVERLAY_GROUPS.length, 2);
+  const byId = new Map(OVERLAY_GROUPS.map((g) => [g.id, g]));
+
+  const natural = byId.get("natural");
+  assert.ok(natural, "natural group present");
+  assert.equal(natural?.key, "mtb:scale");
+  assert.deepEqual(natural?.layerIds, ["mtb-casing", "mtb-scale"]);
+  assert.equal(natural?.colors, MTB_COLORS);
+  assert.equal(natural?.labels, MTB_LABELS);
+
+  const bikepark = byId.get("bikepark");
+  assert.ok(bikepark, "bikepark group present");
+  assert.equal(bikepark?.key, "mtb:scale:imba");
+  assert.deepEqual(bikepark?.layerIds, ["bikepark-casing", "bikepark-imba"]);
+  assert.equal(bikepark?.colors, IMBA_COLORS);
+  assert.equal(bikepark?.labels, IMBA_LABELS);
+});
+
+test("OVERLAY_GROUPS layer ids match what the layer builders emit", () => {
+  const naturalIds = mtbOverlayLayers().map((l) => l.id).sort();
+  const bikeparkIds = bikeParkOverlayLayers().map((l) => l.id).sort();
+  assert.deepEqual(naturalIds.sort(), [...OVERLAY_GROUPS[0]!.layerIds].sort());
+  assert.deepEqual(bikeparkIds.sort(), [...OVERLAY_GROUPS[1]!.layerIds].sort());
+});
+
+test("applyOverlayVisibility: toggles each group's layers via the map API", () => {
+  const calls: string[] = [];
+  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const fakeMap = {
+    getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
+    setLayoutProperty: (id: string, name: string, value: string) => {
+      assert.equal(name, "visibility");
+      calls.push(`${id}=${value}`);
+    },
+  };
+
+  // All on (default) → everything visible.
+  applyOverlayVisibility(fakeMap, { natural: true, bikepark: true });
+  assert.deepEqual(calls, [
+    "mtb-casing=visible",
+    "mtb-scale=visible",
+    "bikepark-casing=visible",
+    "bikepark-imba=visible",
+  ]);
+  calls.length = 0;
+
+  // Natural off, bikepark on → natural hidden, bikepark visible (independent).
+  applyOverlayVisibility(fakeMap, { natural: false, bikepark: true });
+  assert.deepEqual(calls, [
+    "mtb-casing=none",
+    "mtb-scale=none",
+    "bikepark-casing=visible",
+    "bikepark-imba=visible",
+  ]);
+  calls.length = 0;
+
+  // Absent state (e.g. pre-persistence) → defaults to visible (trails show).
+  applyOverlayVisibility(fakeMap, {});
+  assert.equal(calls.filter((c) => c.endsWith("=none")).length, 0);
+});
+
+test("applyOverlayVisibility: safe before layers exist (no throw, no calls)", () => {
+  const calls: string[] = [];
+  const emptyMap = {
+    getLayer: () => undefined,
+    setLayoutProperty: (...a: unknown[]) => calls.push(String(a[0])),
+  };
+  applyOverlayVisibility(emptyMap, { natural: false, bikepark: false });
+  assert.equal(calls.length, 0, "skips layers that are not added yet");
+  // A map without the API at all must not throw either.
+  applyOverlayVisibility(null, { natural: false });
+  applyOverlayVisibility({}, { natural: false });
+});
+
+test("applyOverlayOpacity: sets line-opacity on each group's layers independently", () => {
+  const calls: string[] = [];
+  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const fakeMap = {
+    getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
+    setPaintProperty: (id: string, name: string, value: number) => {
+      assert.equal(name, "line-opacity");
+      calls.push(`${id}=${value}`);
+    },
+  };
+
+  // Per-group values apply to that group's casing + line only.
+  applyOverlayOpacity(fakeMap, { opacity: { natural: 0.8, bikepark: 0.25 } });
+  assert.deepEqual(calls, [
+    "mtb-casing=0.8",
+    "mtb-scale=0.8",
+    "bikepark-casing=0.25",
+    "bikepark-imba=0.25",
+  ]);
+});
+
+test("applyOverlayOpacity: skips missing/invalid values (leaves layers untouched)", () => {
+  const calls: string[] = [];
+  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const fakeMap = {
+    getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
+    setPaintProperty: (id: string, _name: string, value: number) => calls.push(`${id}=${value}`),
+  };
+
+  // No opacity key at all → nothing applied.
+  applyOverlayOpacity(fakeMap, {});
+  assert.equal(calls.length, 0, "no opacity key → no calls");
+  // A group absent from opacity → that group untouched, the other applied.
+  calls.length = 0;
+  applyOverlayOpacity(fakeMap, { opacity: { natural: 0.7 } });
+  assert.deepEqual(calls, ["mtb-casing=0.7", "mtb-scale=0.7"]);
+  // Out-of-range / non-numeric values are rejected.
+  calls.length = 0;
+  applyOverlayOpacity(fakeMap, { opacity: { natural: 0, bikepark: 2 } });
+  assert.equal(calls.length, 0, "0 and >1 are rejected");
+  calls.length = 0;
+  applyOverlayOpacity(fakeMap, { opacity: { natural: "0.5" } });
+  assert.equal(calls.length, 0, "strings are rejected");
+  calls.length = 0;
+  applyOverlayOpacity(fakeMap, { opacity: { natural: NaN } });
+  assert.equal(calls.length, 0, "NaN is rejected");
+});
+
+test("applyOverlayOpacity: safe before layers exist (no throw, no calls)", () => {
+  const calls: string[] = [];
+  const emptyMap = {
+    getLayer: () => undefined,
+    setPaintProperty: (...a: unknown[]) => calls.push(String(a[0])),
+  };
+  applyOverlayOpacity(emptyMap, { opacity: { natural: 0.5, bikepark: 0.5 } });
+  assert.equal(calls.length, 0, "skips layers that are not added yet");
+  // A map without the paint API (or null) must not throw either.
+  applyOverlayOpacity(null, { opacity: { natural: 0.5 } });
+  applyOverlayOpacity({}, { opacity: { natural: 0.5 } });
 });
 
 test("overlay layer ids do not collide with the basemap style (if vendored)", () => {
@@ -167,8 +424,8 @@ test("overlay layer ids do not collide with the basemap style (if vendored)", ()
   assert.ok(basemapIds.size > 100, "sanity: the vendored OMT style has many layers");
 });
 
-test("NORWAY_BOUNDS: a sensible mainland Norway extent", () => {
-  const [[w, s], [e, n]] = NORWAY_BOUNDS;
+test("DEFAULT_BOUNDS: a sensible mainland Norway extent (the default extract)", () => {
+  const [[w, s], [e, n]] = DEFAULT_BOUNDS;
   assert.ok(w > -20 && w < 10, "west edge");
   assert.ok(e > 25 && e < 40, "east edge");
   assert.ok(s > 55 && s < 59, "south edge");

@@ -8,12 +8,17 @@ import { status } from "./status.js";
 import { runMtbProfile, runPlanetiler } from "./build.js";
 import {
   MTB_OVERLAY_LAYER,
+  MTB_PROFILE_VERSION,
   readMtbMinzoom,
+  readMtbProfileVersion,
+  readMtbHasBikePark,
+  readTilesetView,
   REQUIRED_MAXZOOM,
   VerifyError,
   verifyMbtiles,
   verifyMtbMbtiles,
 } from "./verify.js";
+import { readOsmDataDate } from "./osm-date.js";
 import { verifyMtbServing, verifyStyleServing } from "./style.js";
 
 /**
@@ -120,6 +125,11 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
     status.update({ message: "Tileset verified — building MTB tileset" });
   }
 
+  // The mtb-profile version + whether the tileset carries bike-park trails,
+  // tracked for the status snapshot and the stale-profile warning below.
+  let mtbProfileVersion: string | null;
+  let mtbHasBikePark: boolean;
+
   // Step 11 (decision B1): the dedicated low-zoom MTB overlay tileset. It is
   // built from the same OSM extract by the mtb-profile jar (ways with a
   // non-empty mtb:scale, z MTB_MINZOOM..14) and verified before serving.
@@ -164,6 +174,8 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
           message: `Verifying MTB tileset — scanning mtb_scale (${scanned.toLocaleString("en-US")} tiles checked)`,
         }),
     });
+    mtbProfileVersion = mv.profileVersion;
+    mtbHasBikePark = mv.hasBikePark;
     const sample = mv.hits[0]!;
     log(
       `mtb tileset verified: ${mv.layers.join(", ")} layers, z${mv.zooms[0]}–z${mv.zooms[mv.zooms.length - 1]}, ` +
@@ -173,8 +185,24 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
     status.update({ message: "MTB tileset verified — starting tile server" });
   } else {
     const size = statSync(cfg.mtbMbtilesFile).size;
+    mtbProfileVersion = readMtbProfileVersion(cfg.mtbMbtilesFile);
+    mtbHasBikePark = readMtbHasBikePark(cfg.mtbMbtilesFile);
     log(`mtb tileset present (minzoom ${cfg.mtbMinzoom}, ${fmtBytes(size)}) — skipping mtb build`);
     status.update({ message: `MTB tileset present (z${cfg.mtbMinzoom}) — starting tile server` });
+  }
+
+  // Workstream C: a tileset built by an older profile (v1) still renders
+  // natural trails (the overlay filter is back-compatible) but has no
+  // bike-park data — warn (do not fail) and point at FORCE_REIMPORT. A
+  // future/newer version is fine.
+  const expectedProfile = Number(MTB_PROFILE_VERSION);
+  const gotProfile = mtbProfileVersion === null ? null : Number(mtbProfileVersion);
+  if (gotProfile === null || gotProfile < expectedProfile) {
+    log(
+      `warning: mtb tileset was built by profile ${mtbProfileVersion ?? "(v1, no version recorded)"} ` +
+        `but this app expects profile ${MTB_PROFILE_VERSION} — natural trails render, but bike-park ` +
+        `trails (mtb:scale:imba) need a rebuild: FORCE_REIMPORT=1`,
+    );
   }
 
   status.update({ state: "starting", message: "Starting Martin tile server" });
@@ -193,10 +221,21 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
   status.update({ message: "Verifying MTB overlay serving" });
   await verifyMtbServing(cfg, martin.url);
 
+  // Workstream A + D: the OSM data date and the tileset's own bounds/center,
+  // so the UI can show "data as of …" and open the map on the extract's
+  // extent instead of a hardcoded Norway view.
+  const dataDate = readOsmDataDate(cfg.mbtilesFile, cfg.osmFile);
+  const view = readTilesetView(cfg.mbtilesFile);
+  if (dataDate) log(`OSM data as of ${dataDate}`);
+
   status.update({
     state: "ready",
     progress: 100,
     message: "Ready — loading map",
+    name: cfg.countryName,
+    dataDate: dataDate ?? null,
+    bounds: view.bounds,
+    center: view.center,
     martin: {
       url: martin.url,
       source: EXPECTED_SOURCE,
@@ -205,6 +244,8 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
         source: expectedMtbSource(cfg.mtbMbtilesFile),
         layer: MTB_OVERLAY_LAYER,
         minzoom: cfg.mtbMinzoom,
+        hasBikePark: mtbHasBikePark,
+        profileVersion: mtbProfileVersion ?? undefined,
       },
     },
   });
