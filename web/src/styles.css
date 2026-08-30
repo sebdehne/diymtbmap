@@ -1,0 +1,72 @@
+/* Norway MTB Map — UI styles (migrated from the old inline <style> block).
+   The card/map switch is handled by React (conditional rendering), so no
+   display-toggle rules are needed here. */
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #f2efe9; color: #222; margin: 0;
+  display: flex; min-height: 100vh; align-items: center; justify-content: center;
+}
+#map { position: fixed; inset: 0; }
+
+.mapstatus {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+  background: #fff; border: 1px solid #ddd; border-radius: 999px;
+  padding: .4rem .9rem; font-size: .85rem; max-width: 80vw;
+  box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
+.mapstatus.fail { color: #b71c1c; }
+
+.card {
+  background: #fff; border: 1px solid #ddd; border-radius: 12px;
+  padding: 2rem 2.5rem; max-width: 480px; text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,.06);
+}
+h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+.state { font-variant: small-caps; letter-spacing: .08em; color: #666; margin-bottom: 1rem; }
+.bar { height: 10px; background: #e5e1d8; border-radius: 5px; overflow: hidden; }
+.bar > div { height: 100%; background: #43a047; transition: width .4s; }
+.pct { margin-top: .5rem; font-size: .9rem; color: #444; }
+.msg { margin-top: 1rem; font-size: .9rem; color: #555; min-height: 1.2em; word-break: break-word; }
+.msg.error { color: #b71c1c; }
+.credit { margin-top: 1.5rem; font-size: .75rem; color: #999; }
+a { color: #1565c0; }
+
+.errbox { margin-top: 1rem; text-align: left; font-size: .8rem; }
+.errbox summary { cursor: pointer; color: #666; }
+.errmsg {
+  margin: .5rem 0 0; padding: .6rem; background: #faf8f4; border: 1px solid #eee;
+  border-radius: 6px; font-size: .72rem; max-height: 160px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* Info panel (MTB difficulty legend + data sources). Collapsed by default:
+   a round "i" icon, so it costs almost no space on mobile until opened. */
+.mtb-info {
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 8px;
+  font-family: inherit; font-size: .72rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15); max-width: 235px;
+}
+.mtb-info-toggle {
+  display: block; width: 36px; height: 36px; margin: 3px;
+  background: transparent; border: 0; border-radius: 50%;
+  font-size: 1.1rem; line-height: 1; color: #222; cursor: pointer;
+}
+.mtb-info-toggle:hover { background: rgba(0,0,0,.06); }
+.mtb-info.open .mtb-info-toggle { border-bottom: 1px solid #e8e4da; border-radius: 50% 50% 0 0; }
+.mtb-info-body { padding: .1rem .7rem .55rem; }
+.mtb-info-title { font-weight: 600; margin-bottom: .35rem; }
+.mtb-legend-row { display: flex; align-items: center; gap: .4rem; padding: .08rem 0; }
+.mtb-swatch { width: 18px; height: 9px; border-radius: 2px; flex: none; border: 1px solid rgba(0,0,0,.25); }
+.mtb-level { font-weight: 600; width: 1ch; }
+.mtb-name { color: #555; }
+.mtb-info-note { margin-top: .4rem; color: #999; font-size: .68rem; }
+.mtb-info-divider { border: 0; border-top: 1px solid #e8e4da; margin: .55rem 0; }
+.mtb-info-section { font-weight: 600; margin-bottom: .25rem; }
+.mtb-info-src { padding: .08rem 0; color: #555; }
+
+.zoomchip {
+  position: fixed; left: 12px; bottom: 12px; z-index: 10;
+  background: rgba(255,255,255,.95); border: 1px solid #d9d4c8; border-radius: 999px;
+  padding: .3rem .7rem; font-size: .75rem; font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+}

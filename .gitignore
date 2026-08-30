@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# mtb-profile (step 11) build outputs — the jar is built in the Docker
+# `mtb-profile` stage (or locally with: cd mtb-profile && mvn package)
+mtb-profile/target/
+mtb-profile/data/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Everything in public/ is generated/vendored, not committed (the UI source
+# lives in web/ and is committed):
+#   UI build output  index.html + assets/ from `npm run build:web` (Vite),
+#                    or the Dockerfile `build` stage
+#   style + sprite   built from openmaptiles/openmaptiles v3.16 (SHA256-
+#                    pinned) in the Dockerfile `style` stage, or locally
+#                    via: npm run vendor-style
+#   glyph pbf fonts  fetched from openmaptiles/fonts v2.0 (SHA256-pinned)
+#                    at image build time (Dockerfile), or locally via:
+#                    npm run vendor-fonts
+public/*
+!public/.gitkeep
+
+# Data (PBF extracts + osm2pgsql scratch) — mounted as a volume at runtime
+data/
+*.osm.pbf
+*.osm.bz2
+*.mbtiles
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS cruft
+.DS_Store
+
+# Editor / OS specific (volatile IDE state already ignored by .idea/.gitignore)
+*.swp
+.idea/
+/diymtbmap-data.tar

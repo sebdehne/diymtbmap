@@ -1,0 +1,25 @@
+# Martin 1.14 configuration (YAML).
+#
+# Schema: https://github.com/maplibre/martin/blob/main/schemas/config.json
+#
+# Two MBTiles sources:
+#   - openmaptiles.mbtiles — the stock OpenMapTiles basemap (built from the
+#     Norway PBF by Planetiler + the openmaptiles/planetiler-openmaptiles
+#     profile, tag v3.16 — the same data model/style version this app serves).
+#   - mtb.mbtiles — the dedicated low-zoom MTB overlay tileset (step 11):
+#     every way with an mtb:scale tag as layer `mtb` / attribute `mtb_scale`,
+#     z MTB_MINZOOM..14, built by the mtb-profile jar.
+#
+# Martin derives each source ID from the file name -> "openmaptiles" +
+# "mtb", which is what the basemap style, the injected MTB style source, and
+# the overlay reference.
+#
+# The paths must match MBTILES_FILE (DATA_DIR/openmaptiles.mbtiles) and
+# MTB_MBTILES_FILE (DATA_DIR/mtb.mbtiles); the app verifies this at startup
+# and fails fast on a mismatch.
+#
+# The listen address is passed on the command line by the orchestrator
+# (MARTIN_BIND / MARTIN_PORT), so it is not set here.
+mbtiles:
+  - /data/openmaptiles.mbtiles
+  - /data/mtb.mbtiles

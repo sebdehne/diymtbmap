@@ -1,0 +1,681 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { gunzipSync } from "node:zlib";
+import { PbfReader } from "pbf";
+import { VectorTile } from "@mapbox/vector-tile";
+import type { Config } from "./config.js";
+import { log } from "./log.js";
+import { EXPECTED_SOURCE, expectedMtbSource } from "./martin.js";
+import {
+  MTB_OVERLAY_ATTR,
+  MTB_OVERLAY_LAYER,
+  OPTIONAL_LAYERS,
+  REQUIRED_LAYERS,
+  REQUIRED_MAXZOOM,
+  readDeclaredFields,
+  readMtbBounds,
+  type MtbHit,
+} from "./verify.js";
+
+/**
+ * Basemap style (step 7): serve the off-the-shelf OpenMapTiles "OSM
+ * OpenMapTiles" style, pointing the tile source at the app's `/tiles` proxy
+ * (request-host-aware) and making the relative `sprite`/`glyphs` URLs
+ * absolute (MapLibre GL JS 6.x requires an absolute sprite URL — a relative
+ * one throws "Invalid sprite URL ... must be absolute"), and verify the
+ * style is compatible with the tileset the profile produced (source-layers
+ * + referenced fields) before the map is handed to the browser. The
+ * vendored style file is never mutated — the rewrites happen in-memory at
+ * serve time.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface StyleLayerDoc {
+  id?: string;
+  type?: string;
+  source?: string;
+  "source-layer"?: string;
+  filter?: unknown;
+  layout?: Record<string, unknown>;
+  paint?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface StyleDoc {
+  version?: number;
+  name?: string;
+  sources?: Record<string, Record<string, unknown>>;
+  layers?: StyleLayerDoc[];
+  [key: string]: unknown;
+}
+
+/** A bare Express/Node request, narrowed to the headers we read. */
+export interface IncomingRequestLike {
+  headers: { [key: string]: string | string[] | undefined };
+}
+
+export interface StyleAnalysis {
+  /** Distinct `source` values referenced by layers. */
+  sources: string[];
+  /** Distinct `source-layer` values referenced by layers. */
+  sourceLayers: string[];
+  /** Fields the style references, grouped by the source-layer that uses them. */
+  fieldsBySourceLayer: Map<string, Set<string>>;
+  /** Union of every field referenced anywhere in the style. */
+  allFields: Set<string>;
+}
+
+export interface StyleCheckResult {
+  /** Style-referenced layers that are required OMT layers but absent from the tileset. */
+  missingRequiredLayers: string[];
+  /** Style-referenced optional OMT layers absent from the tileset (render empty). */
+  missingOptionalLayers: string[];
+  /** Style-referenced layers that are not a known OMT layer. */
+  unknownLayers: string[];
+  /** Human-readable warnings for fields the style uses but the tileset does not declare. */
+  fieldWarnings: string[];
+}
+
+export interface SmokeResult {
+  url: string;
+  layers: string[];
+  featureCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+/** Reads and parses the style JSON. Pure (no caching); the file is static at runtime. */
+export function loadStyle(file: string): StyleDoc {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    throw new Error(
+      `cannot read style ${file}: ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e },
+    );
+  }
+  try {
+    return JSON.parse(raw) as StyleDoc;
+  } catch (e) {
+    throw new Error(
+      `cannot parse style ${file}: ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Analysis (source-layers + referenced fields)
+// ---------------------------------------------------------------------------
+
+/**
+ * Operators and which argument index (1-based) holds the input field/expression.
+ * Only these positions can carry a shorthand field reference; the value slots
+ * (literals such as "residential", "cemetery", colors) are deliberately not
+ * collected, which keeps false positives low.
+ */
+type FieldArgSpec = number | "all" | "odd" | null;
+const FIELD_ARG: Record<string, FieldArgSpec> = {
+  "==": 1,
+  "!=": 1,
+  ">": 1,
+  ">=": 1,
+  "<": 1,
+  "<=": 1,
+  "!": 1,
+  all: "all",
+  any: "all",
+  in: 1,
+  match: 1,
+  coalesce: "all",
+  case: "odd",
+  step: 1,
+  interpolate: 2,
+  "interpolate-linear": 2,
+  "interpolate-exponential": 2,
+  "interpolate-identity": 2,
+  "to-number": 1,
+  "to-string": 1,
+  "to-boolean": 1,
+  "to-rounded": 1,
+  upcase: 1,
+  downcase: 1,
+  get: 1,
+  has: 1,
+  // Expressions whose first argument is not a data field.
+  var: null,
+  env: null,
+  image: null,
+  "heatmap-density": null,
+  "line-metrics": null,
+};
+
+/** Special tokens that can appear in expression position but are not data fields. */
+const NON_FIELD_TOKENS = new Set(["linear", "exponential", "identity", "zoom"]);
+
+const NUMERIC_RE = /^-?\d+(\.\d+)?$/;
+
+function argIndices(spec: FieldArgSpec, len: number): number[] {
+  if (spec === null) return [];
+  if (spec === "all") {
+    const r: number[] = [];
+    for (let i = 1; i < len; i++) r.push(i);
+    return r;
+  }
+  if (spec === "odd") {
+    const r: number[] = [];
+    for (let i = 1; i < len; i += 2) r.push(i);
+    return r;
+  }
+  if (spec >= 1 && spec < len) return [spec];
+  return [];
+}
+
+/**
+ * Walks a MapLibre expression tree and records the data-field names it
+ * references. Handles both the explicit `["get","field"]` / `["has","field"]`
+ * forms and the shorthand form where a bare string in an expression position
+ * means `["get","field"]`. Value literals are not collected.
+ */
+function collectFields(node: unknown, out: Set<string>): void {
+  if (!Array.isArray(node)) return;
+  const op = node[0];
+  if (typeof op !== "string" || node.length < 2) return;
+  const spec = FIELD_ARG[op] ?? 1;
+  for (const i of argIndices(spec, node.length)) {
+    const arg = node[i];
+    if (typeof arg === "string") {
+      if (arg.startsWith("$")) continue; // $type, $id, ...
+      if (NON_FIELD_TOKENS.has(arg)) continue;
+      if (NUMERIC_RE.test(arg)) continue;
+      out.add(arg);
+    } else if (arg !== null && typeof arg === "object") {
+      collectFields(arg, out);
+    }
+  }
+}
+
+/** Extracts the sources, source-layers, and referenced fields a style uses. */
+export function analyzeStyle(style: StyleDoc): StyleAnalysis {
+  const sources = new Set<string>();
+  const sourceLayers = new Set<string>();
+  const fieldsBySourceLayer = new Map<string, Set<string>>();
+  const allFields = new Set<string>();
+  for (const layer of style.layers ?? []) {
+    if (layer.source) sources.add(layer.source);
+    const sl = layer["source-layer"];
+    if (sl === undefined) continue;
+    sourceLayers.add(sl);
+    const fields = new Set<string>();
+    if (layer.filter !== undefined) collectFields(layer.filter, fields);
+    if (layer.layout !== undefined) collectFields(layer.layout, fields);
+    if (layer.paint !== undefined) collectFields(layer.paint, fields);
+    const existing = fieldsBySourceLayer.get(sl);
+    if (existing) {
+      for (const f of fields) existing.add(f);
+    } else {
+      fieldsBySourceLayer.set(sl, fields);
+    }
+    for (const f of fields) allFields.add(f);
+  }
+  return {
+    sources: [...sources].sort(),
+    sourceLayers: [...sourceLayers].sort(),
+    fieldsBySourceLayer,
+    allFields,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility with the tileset
+// ---------------------------------------------------------------------------
+
+/**
+ * Cross-checks what the style references against what the tileset declares.
+ *
+ *  - a style-referenced source-layer that is a REQUIRED OMT layer but missing
+ *    from the tileset is a hard problem (the layer renders empty);
+ *  - a missing OPTIONAL layer, or a non-OMT layer, is a soft warning;
+ *  - a field the style uses but the tileset does not declare on that layer is
+ *    a warning (profile-vs-schema difference, or an extract with no such
+ *    features — both render the affected rules empty but do not break the map).
+ */
+export function checkStyleCompatibility(
+  analysis: StyleAnalysis,
+  tilesetLayers: readonly string[],
+  declaredFields: ReadonlyMap<string, readonly string[]>,
+): StyleCheckResult {
+  const layerSet = new Set(tilesetLayers);
+  const requiredSet = new Set<string>(REQUIRED_LAYERS);
+  const optionalSet = new Set<string>(OPTIONAL_LAYERS);
+
+  const missingRequiredLayers: string[] = [];
+  const missingOptionalLayers: string[] = [];
+  const unknownLayers: string[] = [];
+  for (const sl of analysis.sourceLayers) {
+    if (layerSet.has(sl)) continue;
+    if (requiredSet.has(sl)) missingRequiredLayers.push(sl);
+    else if (optionalSet.has(sl)) missingOptionalLayers.push(sl);
+    else unknownLayers.push(sl);
+  }
+
+  const fieldWarnings: string[] = [];
+  for (const sl of [...analysis.fieldsBySourceLayer.keys()].sort()) {
+    if (!layerSet.has(sl)) continue; // missing layer already reported above
+    const used = analysis.fieldsBySourceLayer.get(sl);
+    if (used === undefined) continue;
+    const declared = declaredFields.get(sl) ?? [];
+    const declaredSet = new Set(declared);
+    for (const f of [...used].sort()) {
+      if (declaredSet.has(f)) continue;
+      fieldWarnings.push(
+        `style uses field "${f}" on source-layer "${sl}" but the tileset does not declare it there (declared: ${
+          declared.length > 0 ? declared.join(", ") : "none"
+        }) — the affected rules will render empty`,
+      );
+    }
+  }
+
+  return { missingRequiredLayers, missingOptionalLayers, unknownLayers, fieldWarnings };
+}
+
+// ---------------------------------------------------------------------------
+// Serve-time rewrite (request-host-aware)
+// ---------------------------------------------------------------------------
+
+function firstString(v: string | string[] | undefined): string | undefined {
+  if (v === undefined) return undefined;
+  if (Array.isArray(v)) return v[0];
+  return v;
+}
+
+function requestProto(req: IncomingRequestLike): string {
+  return firstString(req.headers["x-forwarded-proto"])?.split(",")[0]?.trim() || "http";
+}
+
+/**
+ * The origin (`proto://host[:port]`) the browser used to reach us, derived
+ * from the request (Host header + optional x-forwarded-proto). The request
+ * port is KEPT — the sprite/glyphs must be reachable on the app's own port
+ * (e.g. 8080), not a scheme default. Remote clients get URLs on the same
+ * hostname; the client already brackets IPv6 hosts in the Host header.
+ */
+export function buildAppOrigin(req: IncomingRequestLike): string {
+  const hostRaw = firstString(req.headers["host"]) ?? "localhost";
+  return `${requestProto(req)}://${hostRaw}`;
+}
+
+/**
+ * The source-spec fragment for a vector tile source in the served style.
+ *
+ * MapLibre GL JS 6.x treats a vector source's `url` as a **TileJSON
+ * endpoint it fetches** (`load()` does `transformRequest(url, "Source")` and
+ * merges the JSON document into the source — the response must be JSON with
+ * `tiles` etc.). A bare tile base is NOT a TileJSON endpoint, so the step 12
+ * (single-port) default path instead inlines a `tiles` template — MapLibre
+ * consumes it directly, no fetch:
+ *
+ *   { tiles: ["<origin>/tiles/openmaptiles/{z}/{x}/{y}"] }
+ *
+ * A full `TILE_SOURCE_URL` override (reverse proxies, external tile servers)
+ * is a TileJSON endpoint (e.g. Martin's `http://host:3399/openmaptiles`)
+ * and is passed through verbatim as `url`.
+ *
+ * The inline form also sets `maxzoom` to the tileset's max zoom (z14,
+ * REQUIRED_MAXZOOM). Without it MapLibre uses its default source maxzoom
+ * (18) and starts requesting z15+ tiles — the tileset ends at z14 and the
+ * server 404s them, so the map renders completely blank beyond z14. With
+ * `maxzoom: 14`, MapLibre overzooms instead (stretches the z14 vectors
+ * client-side) and never requests deeper tiles. (The TileJSON `url` form
+ * needs no such cap — the TileJSON document carries its own `maxzoom`.)
+ */
+export interface TileSourceSpec {
+  url?: string;
+  tiles?: string[];
+  /** Max zoom MapLibre requests tiles at (see the doc comment above). */
+  maxzoom?: number;
+}
+
+/** The source-spec fragment for the basemap (request-host-aware). */
+export function buildTileSourceSpec(req: IncomingRequestLike, cfg: Config): TileSourceSpec {
+  if (cfg.tileSourceUrl) return { url: cfg.tileSourceUrl };
+  return {
+    tiles: [`${buildAppOrigin(req)}${cfg.basePath || ""}/tiles/${EXPECTED_SOURCE}/{z}/{x}/{y}`],
+    maxzoom: REQUIRED_MAXZOOM,
+  };
+}
+
+/**
+ * The source-spec fragment for the MTB overlay source (step 11), through the
+ * same app-side `/tiles` proxy as the basemap (step 12). With a
+ * `TILE_SOURCE_URL` override the same base is used and only the trailing
+ * source id is swapped.
+ */
+export function buildMtbSourceSpec(req: IncomingRequestLike, cfg: Config): TileSourceSpec {
+  const id = expectedMtbSource(cfg.mtbMbtilesFile);
+  if (cfg.tileSourceUrl) return { url: `${cfg.tileSourceUrl.replace(/\/[^/]+$/, "")}/${id}` };
+  return {
+    tiles: [`${buildAppOrigin(req)}${cfg.basePath || ""}/tiles/${id}/{z}/{x}/{y}`],
+    maxzoom: REQUIRED_MAXZOOM,
+  };
+}
+
+function isAbsoluteUrl(u: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(u);
+}
+
+/**
+ * Returns a copy of the style with `sources[EXPECTED_SOURCE]` pointed at the
+ * tile server via `basemap` (a `tiles` template, or a TileJSON `url` override),
+ * with the step-11 MTB overlay source (`mtb.id` -> `{type: "vector", ...spec}`)
+ * added, and — when `appOrigin` is given — with the relative `sprite` and
+ * `glyphs` URLs resolved against it (MapLibre GL JS 6.x requires an absolute
+ * sprite URL; glyphs resolve against the origin in browsers, but absolute is
+ * explicit and safe). Already-absolute values are left as-is. The vendored
+ * source's own `url` (Martin's `mbtiles://...`) is always dropped — a
+ * leftover `url` would make MapLibre fetch it as a TileJSON endpoint. Every
+ * other part of the style (including the inert `attribution` source, which
+ * carries the OMT/OSM credit) is left untouched, and the input object is not
+ * mutated. The vendored style never declares the MTB source (it is
+ * app-specific), so it is always injected.
+ */
+export function withTileSources(
+  style: StyleDoc,
+  basemap: TileSourceSpec,
+  mtb: { id: string; spec: TileSourceSpec },
+  appOrigin?: string,
+): StyleDoc {
+  const sources = style.sources ?? {};
+  const target = sources[EXPECTED_SOURCE];
+  if (target === undefined) {
+    throw new Error(
+      `style has no "${EXPECTED_SOURCE}" source to point at the tile server (sources: ${
+        Object.keys(sources).join(", ") || "none"
+      })`,
+    );
+  }
+  const base = { ...target };
+  delete base.url;
+  const out: StyleDoc = {
+    ...style,
+    sources: {
+      ...sources,
+      [EXPECTED_SOURCE]: { ...base, ...basemap },
+      [mtb.id]: { type: "vector", ...mtb.spec },
+    },
+  };
+  if (appOrigin !== undefined) {
+    const origin = appOrigin.replace(/\/+$/, "");
+    if (typeof style.sprite === "string" && !isAbsoluteUrl(style.sprite)) {
+      // The origin may carry a BASE_PATH prefix (app mounted under e.g.
+      // /mtb): the trailing "/" makes the sprite resolve INSIDE the base.
+      out.sprite = new URL(style.sprite, `${origin}/`).toString();
+    }
+    if (typeof style.glyphs === "string" && !isAbsoluteUrl(style.glyphs)) {
+      // String concat on purpose: the glyphs template carries
+      // {fontstack}/{range} tokens that MapLibre substitutes AFTER style
+      // load — new URL() would percent-encode the braces and break the
+      // substitution (and a bare new URL() rejects the relative value).
+      const g = style.glyphs.startsWith("/") ? style.glyphs : `/${style.glyphs}`;
+      out.glyphs = `${origin}${g}`;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Render smoke test (tiles over HTTP)
+// ---------------------------------------------------------------------------
+
+function isGzip(data: Uint8Array): boolean {
+  return data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b;
+}
+
+function maybeGunzip(data: Uint8Array): Uint8Array {
+  return isGzip(data) ? new Uint8Array(gunzipSync(Buffer.from(data))) : data;
+}
+
+/**
+ * Low-zoom tiles (world coverage) plus a couple of mid-zoom tiles around
+ * Norway — enough that at least one real extract will return features.
+ */
+const SMOKE_CANDIDATES: [number, number, number][] = [
+  [1, 0, 0],
+  [1, 1, 0],
+  [1, 0, 1],
+  [1, 1, 1],
+  [2, 1, 1],
+  [2, 2, 1],
+  [2, 1, 2],
+  [2, 2, 2],
+  [3, 2, 2],
+  [3, 3, 3],
+  [3, 5, 3],
+  [4, 5, 3],
+  [4, 9, 5],
+  [6, 33, 18],
+  [7, 66, 37],
+];
+
+/**
+ * Proves the full serving chain end-to-end: fetches real tiles from the tile
+ * server over HTTP and decodes them as MVT. Prefers the first tile with
+ * features; falls back to any decodable tile; throws if none decode.
+ */
+export async function renderSmokeTest(tileBaseUrl: string, source: string): Promise<SmokeResult> {
+  let lastDecoded: SmokeResult | null = null;
+  for (const [z, x, y] of SMOKE_CANDIDATES) {
+    const url = `${tileBaseUrl}/${source}/${z}/${x}/${y}`;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+      if (!res.ok) continue;
+      const raw = new Uint8Array(await res.arrayBuffer());
+      const vt = new VectorTile(new PbfReader(maybeGunzip(raw)));
+      const layers = Object.keys(vt.layers).sort();
+      let featureCount = 0;
+      for (const name of layers) featureCount += vt.layers[name]!.length;
+      const result: SmokeResult = { url, layers, featureCount };
+      if (featureCount > 0) return result;
+      lastDecoded = result;
+    } catch {
+      // not this tile — try the next
+    }
+  }
+  if (lastDecoded !== null) return lastDecoded;
+  throw new Error(
+    `render smoke test failed: no decodable ${source} tile among z${SMOKE_CANDIDATES.map(
+      ([z]) => z,
+    ).join(",z")} — the tile server is not serving valid MVT`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Startup verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Step 7 gate: the style must exist, reference only layers the tileset has
+ * (required ones present), and the tile server must actually serve decodable
+ * tiles. Runs at startup (fail-fast) after Martin is up.
+ */
+export async function verifyStyleServing(cfg: Config, martinUrl: string): Promise<void> {
+  const styleFile = path.join(cfg.publicDir, "style.json");
+  if (!existsSync(styleFile)) {
+    throw new Error(
+      `basemap style not found: ${styleFile} — run "npm run vendor-style" (container builds always include it)`,
+    );
+  }
+  const style = loadStyle(styleFile);
+  const analysis = analyzeStyle(style);
+  const declaredFields = readDeclaredFields(cfg.mbtilesFile);
+  const result = checkStyleCompatibility(analysis, [...declaredFields.keys()], declaredFields);
+
+  if (result.missingRequiredLayers.length > 0) {
+    throw new Error(
+      `the basemap style references required tileset layer(s) that are missing: ${result.missingRequiredLayers.join(
+        ", ",
+      )} (tileset layers: ${[...declaredFields.keys()].sort().join(", ")})`,
+    );
+  }
+  for (const l of result.missingOptionalLayers) {
+    log(`warning: style references optional layer "${l}" which the tileset lacks — it renders empty`);
+  }
+  for (const l of result.unknownLayers) {
+    log(`warning: style references non-OMT layer "${l}" — it renders empty`);
+  }
+  for (const w of result.fieldWarnings) log(`warning: ${w}`);
+
+  const smoke = await renderSmokeTest(martinUrl, EXPECTED_SOURCE);
+  log(
+    `basemap style OK: ${analysis.sourceLayers.length} source-layers, ${analysis.allFields.size} ` +
+      `fields referenced (${result.fieldWarnings.length} field warning(s)); smoke tile ${smoke.url} ` +
+      `decoded over HTTP (${smoke.layers.length} layers, ${smoke.featureCount} features)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 11: MTB overlay serving check (tiles over HTTP)
+// ---------------------------------------------------------------------------
+
+export interface MtbServeResult {
+  source: string;
+  hits: MtbHit[];
+}
+
+/** Safety cap on tiles fetched per gate zoom while looking for mtb_scale. */
+const MTB_SERVE_MAX_TILES = 2_000;
+
+/**
+ * Step 11 gate: the MTB overlay tileset must actually be SERVED with content
+ * — a `mtb` feature with a non-empty `mtb_scale` at BOTH the minzoom and z14,
+ * fetched over HTTP from the tile server (the artifact gate
+ * `verifyMtbMbtiles` checks the file; this checks the serving chain: Martin
+ * config, source id, routing, MVT encoding). Tiles covering the tileset
+ * bounds are fetched in order per gate zoom, stopping at the first hit.
+ */
+export async function verifyMtbServing(cfg: Config, martinUrl: string): Promise<MtbServeResult> {
+  const source = expectedMtbSource(cfg.mtbMbtilesFile);
+  const bounds = readMtbBounds(cfg.mtbMbtilesFile);
+  if (bounds === null) {
+    throw new Error(
+      `cannot read the bounds metadata of ${cfg.mtbMbtilesFile} — cannot locate tiles for the MTB serving check`,
+    );
+  }
+  const gateZooms = Array.from(new Set([cfg.mtbMinzoom, REQUIRED_MAXZOOM])).sort((a, b) => a - b);
+  const hits: MtbHit[] = [];
+  for (const z of gateZooms) {
+    const { hit, fetched } = await findServedMtbTile(martinUrl, source, z, bounds);
+    if (hit === null) {
+      throw new Error(
+        `no ${MTB_OVERLAY_LAYER} feature with a non-empty ${MTB_OVERLAY_ATTR} served at z${z} ` +
+          `(${fetched} tiles over the tileset bounds tried) — the tile server is not serving the mtb tileset correctly`,
+      );
+    }
+    hits.push(hit);
+  }
+  log(
+    `mtb serving OK: source "${source}" serves ${MTB_OVERLAY_LAYER}.${MTB_OVERLAY_ATTR} over HTTP at ` +
+      `z${gateZooms.map((z) => `${z}`).join(" and z")} ` +
+      `(${hits.map((h) => `z${h.zoom}/${h.x}/${h.y} ${JSON.stringify(h.properties)}`).join("; ")})`,
+  );
+  return { source, hits };
+}
+
+/**
+ * Fetches tiles covering `bounds` at `zoom` over HTTP from
+ * `<base>/<source>/z/x/y`, stopping at the first `mtb` feature with a
+ * non-empty mtb_scale (or the safety cap). Returns the hit (or null) plus
+ * how many tiles were fetched.
+ *
+ * The scan is a COARSE-TO-FINE GRID (32×32 points, halving per pass) rather
+ * than a corner-anchored raster: over wide bounds a raster scan burns the
+ * whole cap on one corner and misses content concentrated elsewhere (e.g.
+ * the Sørlandet tileset at z14: 224×181 tiles, content from column ~40 — a
+ * raster scan of 2000 tiles never reaches it). The grid guarantees the cap
+ * is spent spread over the whole bounds.
+ */
+async function findServedMtbTile(
+  martinUrl: string,
+  source: string,
+  zoom: number,
+  bounds: [number, number, number, number],
+): Promise<{ hit: MtbHit | null; fetched: number }> {
+  const size = 1 << zoom;
+  const [west, south, east, north] = bounds;
+  const x0 = clamp(lonToTile(west, zoom), 0, size - 1);
+  const x1 = clamp(lonToTile(east, zoom), 0, size - 1);
+  const y0 = clamp(latToTile(north, zoom), 0, size - 1);
+  const y1 = clamp(latToTile(south, zoom), 0, size - 1);
+  const width = x1 - x0 + 1;
+  const height = y1 - y0 + 1;
+  const tried = new Set<string>();
+  let fetched = 0;
+
+  const fetchTile = async (x: number, y: number): Promise<MtbHit | null> => {
+    const res = await fetch(`${martinUrl}/${source}/${zoom}/${x}/${y}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const raw = new Uint8Array(await res.arrayBuffer());
+    const data = maybeGunzip(raw);
+    const buf = Buffer.from(data);
+    // Fast pre-filter: the MVT keys array contains "mtb_scale" in every
+    // tile where any feature carries the attribute.
+    if (buf.indexOf(MTB_OVERLAY_ATTR) === -1) return null;
+    const vt = new VectorTile(new PbfReader(new Uint8Array(buf)));
+    const layer = vt.layers[MTB_OVERLAY_LAYER];
+    if (layer === undefined) return null;
+    for (let i = 0; i < layer.length; i++) {
+      const props = layer.feature(i).properties;
+      const value = props[MTB_OVERLAY_ATTR];
+      if (value !== undefined && value !== "") {
+        return { zoom, x, y, layer: MTB_OVERLAY_LAYER, properties: { ...props } };
+      }
+    }
+    return null;
+  };
+
+  for (let grid = 32; grid >= 1; grid = Math.max(1, grid / 2)) {
+    const sx = Math.max(1, Math.ceil(width / grid));
+    const sy = Math.max(1, Math.ceil(height / grid));
+    for (let i = 0; i < width; i += sx) {
+      for (let j = 0; j < height; j += sy) {
+        const x = x0 + i;
+        const y = y0 + j;
+        const key = `${x}:${y}`;
+        if (tried.has(key)) continue;
+        if (fetched >= MTB_SERVE_MAX_TILES) return { hit: null, fetched };
+        tried.add(key);
+        fetched += 1;
+        try {
+          const hit = await fetchTile(x, y);
+          if (hit !== null) return { hit, fetched };
+        } catch {
+          // not this tile — try the next
+        }
+      }
+    }
+    if (sx === 1 && sy === 1) break; // fully covered
+  }
+  return { hit: null, fetched };
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function lonToTile(lon: number, zoom: number): number {
+  return Math.floor(((lon + 180) / 360) * (1 << zoom));
+}
+
+function latToTile(lat: number, zoom: number): number {
+  const rad = (lat * Math.PI) / 180;
+  const y = (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2;
+  return Math.floor(y * (1 << zoom));
+}
