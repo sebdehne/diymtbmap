@@ -18,7 +18,7 @@
 | **openmaptiles/fonts** | v2.0 (`noto-open-sans`) | Glyph PBFs for the style's Open Sans / Noto Sans stacks. |
 | **better-sqlite3** | 12.x | Reads MBTiles (SQLite) metadata + tiles for verification. |
 | **@mapbox/vector-tile** + **pbf** | 3.x / 5.x | Decodes MVT during verification + render smoke tests. |
- | **Python 3 + GDAL 3.x + numpy** | host-side, optional | `tools/dem/build-dem.py` — builds the optional `dem.mbtiles` elevation tileset (3D terrain). **Not in the image** (Option B, host-side). |
+ | **Python 3 + GDAL 3.x + numpy** | host-side, optional | `tools/dem-to-raster-tiles-converter/build-dem.py` — builds the optional `dem.mbtiles` elevation tileset (3D terrain). **Not in the image** (Option B, host-side). |
 
 **Design principle: stay off-the-shelf.** The basemap is the OMT style, unmodified,
 rendering the OMT data model produced by the OMT team's own Planetiler profile — so
@@ -109,7 +109,7 @@ raise).
 | | Basemap | MTB overlay | Elevation (optional) |
 |---|---|---|---|
 | Artifact | `openmaptiles.mbtiles` | `mtb.mbtiles` | `dem.mbtiles` |
- | Builder | OMT profile jar (v3.16) | `mtb-profile` jar | `tools/dem/build-dem.py` (host-side, GDAL) |
+ | Builder | OMT profile jar (v3.16) | `mtb-profile` jar | `tools/dem-to-raster-tiles-converter/build-dem.py` (host-side, GDAL) |
 | Type | vector (MVT) | vector (MVT) | **raster-dem** (PNG) |
 | Content | All 16 OMT layers (roads, water, places, POI, …) | Only ways with a non-empty `mtb:scale` | Elevation in meters, per-pixel RGB-packed — drives **all three** elevation overlays |
 | Key attribute | (class/subclass derived) | `mtb_scale` (raw string, e.g. `"3"`, `"4+"`) | `encoding` (mapbox/terrarium) + `tileSize` |
@@ -206,8 +206,8 @@ per-pixel RGB packing — **not** a vector layer), so the pipeline adds a third,
 
 #### The `dem` tileset (shared plumbing)
 
-- **Built host-side** by `tools/dem/build-dem.py` (Python + GDAL, its own
-   `tools/dem/` subproject under the shared `tools/` folder). The image stays GDAL/Python-free
+- **Built host-side** by `tools/dem-to-raster-tiles-converter/build-dem.py` (Python + GDAL, its own
+   `tools/dem-to-raster-tiles-converter/` subproject under the shared `tools/` folder). The image stays GDAL/Python-free
   (Option B); the converter only *produces* the artifact.
 - **Served by Martin** like the other tilesets: it rides the existing
   `/tiles/:source/:z/:x/:y` proxy (source id `dem`, derived from the file name)
@@ -447,6 +447,6 @@ Third-party tools and data:
 - **Natural Earth** (admin boundaries / water, auto-downloaded by Planetiler) — <https://www.naturalearthdata.com/> (public domain)
 - **Open Sans / Noto Sans glyphs** — <https://github.com/openmaptiles/fonts> (open source)
 - **Elevation (optional 3D + hillshade + contours)** — the user's own GeoTIFF DEM,
-   converted by `tools/dem/build-dem.py`. For the Norway default this is the **Norwegian
+   converted by `tools/dem-to-raster-tiles-converter/build-dem.py`. For the Norway default this is the **Norwegian
   Basisdata DTM10** (Kartverket). When a `dem.mbtiles` is served, the info panel
   adds an elevation credit.

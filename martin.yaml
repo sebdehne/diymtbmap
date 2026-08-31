@@ -11,7 +11,7 @@
 #     z MTB_MINZOOM..14, built by the mtb-profile jar.
 #   - dem.mbtiles — the OPTIONAL 3D-terrain tileset (step: 3D terrain): a
 #     `raster-dem` source (image/png tiles packed to elevation), built by the
-#     standalone tools/dem/build-dem.py converter and dropped into the data volume.
+#     standalone tools/dem-to-raster-tiles-converter/build-dem.py converter and dropped into the data volume.
 #     NOT built by this app. It also drives the client-side hillshade + contour
 #     lines (maplibre-contour), so there is NO separate contour tileset.
 #

@@ -34,7 +34,7 @@ builds [OpenMapTiles](https://openmaptiles.org/) vector tiles with
   (default on) and **contour lines** (default on) from that one source. Contours
   are computed client-side in the browser by `maplibre-contour` from the same
    `dem` tiles, so there is no separate contour tileset. The tileset is built by
-   a standalone converter (`tools/dem/`), not the container; without the artifact the
+   a standalone converter (`tools/dem-to-raster-tiles-converter/`), not the container; without the artifact the
   Elevation section is simply absent and the map is unchanged.
 
 ---
@@ -177,15 +177,15 @@ vector pipeline was retired with this change and removed from the repo.)
 
 The elevation tileset (`dem.mbtiles`, a MapLibre `raster-dem` MBTiles of PNG
 elevation tiles) is built **outside the container** by the standalone converter
- in [`tools/dem/`](tools/dem/README.md). The image deliberately has no GDAL/Python, so the
+ in [`tools/dem-to-raster-tiles-converter/`](tools/dem-to-raster-tiles-converter/README.md). The image deliberately has no GDAL/Python, so the
 conversion runs on your host (Option B). Then:
 
 1. **Install the tools** — Python 3 + GDAL (`osgeo`) + `numpy`. Per-OS install
-    steps are in [`tools/dem/README.md`](tools/dem/README.md).
+    steps are in [`tools/dem-to-raster-tiles-converter/README.md`](tools/dem-to-raster-tiles-converter/README.md).
 2. **Prove the install** with a synthetic round-trip (no real data needed):
 
    ```sh
-    npm run selftest:dem          # = python3 tools/dem/build-dem.py --selftest
+    npm run selftest:dem          # = python3 tools/dem-to-raster-tiles-converter/build-dem.py --selftest
    ```
 3. **Convert your GeoTIFF DEM** into `dem.mbtiles` (any source CRS — it is
    reprojected to Web Mercator):
@@ -195,8 +195,8 @@ conversion runs on your host (Option B). Then:
        --encoding mapbox --minzoom 6 --maxzoom 11 --tilesize 512
    ```
 
-    (`npm run build:dem -- <args>` just runs `python3 tools/dem/build-dem.py <args>`;
-    the full CLI and output contract are in `tools/dem/README.md`.)
+    (`npm run build:dem -- <args>` just runs `python3 tools/dem-to-raster-tiles-converter/build-dem.py <args>`;
+    the full CLI and output contract are in `tools/dem-to-raster-tiles-converter/README.md`.)
 
 4. **Make sure the app sees it.** The default path is `$DATA_DIR/dem.mbtiles`
    (override with `DEM_MBTILES_FILE`). The file name sets Martin's source id
@@ -287,7 +287,8 @@ Useful scripts:
 | `npm run lint` | ESLint. |
 | `npm run typecheck` | TypeScript type check. |
 | `npm run vendor-style` / `vendor-fonts` | Build/fetch the vendored style + glyph fonts. |
- | `npm run build:dem -- <args>` | Run the 3D-terrain converter (`python3 tools/dem/build-dem.py <args>`). |
+ | `npm run download:dem -- <args>` | Download the Norwegian DTM10 GeoTIFF source data (`python3 tools/dem-downloader-for-norway/download-dtm-norway.py <args>`). |
+| `npm run build:dem -- <args>` | Run the 3D-terrain converter (`python3 tools/dem-to-raster-tiles-converter/build-dem.py <args>`). |
 | `npm run selftest:dem` | Synthetic round-trip self-test of the converter (proves the GDAL install). |
 
 E2E harnesses live in `scripts/` (e.g. `e2e-check.ts`, `e2e-martin.ts`,

@@ -4,7 +4,7 @@ Builds a small synthetic source, converts a tile, and checks the output
 MBTiles: schema, metadata, TMS row order, PNG bytes, and elevation decode.
 
 Run standalone (no pytest needed):   python3 tests/test_metadata.py
-Or under pytest:                     pytest tools/dem/tests/test_metadata.py
+Or under pytest:                     pytest tools/dem-to-raster-tiles-converter/tests/test_metadata.py
 """
 
 import importlib.util

@@ -3,7 +3,7 @@
 // shared/mtb-overlay.js: carries the stable ids/constants and the map-mutating
 // helpers, with the map instance passed in (never imported from the DOM).
 //
-// The optional dem tileset (built by tools/dem/build-dem.py) is a `raster-dem`
+// The optional dem tileset (built by tools/dem-to-raster-tiles-converter/build-dem.py) is a `raster-dem`
 // MBTiles source: image/png tiles whose RGB channels pack elevation (encoding
 // "mapbox" by default, 512 px). The app serves it as source id "dem"
 // (dem.mbtiles -> "dem") and injects it into the served style ONLY when the

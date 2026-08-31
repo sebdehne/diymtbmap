@@ -29,7 +29,7 @@ export interface Config {
   /**
    * Optional 3D-terrain tileset (raster DEM, `dem.mbtiles`): a `raster-dem`
    * MBTiles source the web UI can toggle for real elevation. Built by the
-   * standalone `tools/dem/build-dem.py` converter (Option B, host-side) and dropped
+   * standalone `tools/dem-to-raster-tiles-converter/build-dem.py` converter (Option B, host-side) and dropped
    * into the data volume — it is NOT built by this app. When the file is
    * absent the whole feature degrades away (no `dem` source, no toggle) and
    * everything else is unchanged.
@@ -132,7 +132,7 @@ export function loadConfig(): Config {
     // Where the mtb overlay tileset is written (separate from the basemap).
     mtbMbtilesFile:
       process.env.MTB_MBTILES_FILE ?? path.join(dataDir, "mtb.mbtiles"),
-    // Optional 3D-terrain tileset. Built externally by tools/dem/build-dem.py into
+    // Optional 3D-terrain tileset. Built externally by tools/dem-to-raster-tiles-converter/build-dem.py into
     // this file; the app only serves it. Absent file = feature off (degraded).
     demMbtilesFile:
       process.env.DEM_MBTILES_FILE ?? path.join(dataDir, "dem.mbtiles"),

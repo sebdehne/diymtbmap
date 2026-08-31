@@ -406,7 +406,7 @@ export type DemEncoding = "mapbox" | "terrarium";
 /**
  * The dem.mbtiles artifact spec the served style must declare to match it:
  * the tile pixel size, the raster-dem packing, the zoom range, and (for
- * locating a tile to verify) the bounds. Written by tools/dem/build-dem.py.
+ * locating a tile to verify) the bounds. Written by tools/dem-to-raster-tiles-converter/build-dem.py.
  */
 export interface DemSpec {
   bounds: [number, number, number, number] | null;

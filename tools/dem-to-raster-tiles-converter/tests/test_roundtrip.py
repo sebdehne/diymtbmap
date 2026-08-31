@@ -1,7 +1,7 @@
 """Round-trip and geometry tests for build-dem.py.
 
 Run standalone (no pytest needed):   python3 tests/test_roundtrip.py
-Or under pytest:                     pytest tools/dem/tests/test_roundtrip.py
+Or under pytest:                     pytest tools/dem-to-raster-tiles-converter/tests/test_roundtrip.py
 """
 
 import importlib.util

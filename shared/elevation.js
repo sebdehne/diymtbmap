@@ -4,7 +4,7 @@
 // map instance passed in (never imported from the DOM).
 //
 // Single-source architecture: hillshade AND contour lines both derive from the one
-// `dem` raster-dem tileset (built by tools/dem/build-dem.py). No separate contour vector
+// `dem` raster-dem tileset (built by tools/dem-to-raster-tiles-converter/build-dem.py). No separate contour vector
 // tileset is built or served:
 //   - hillshade  -> a native MapLibre `hillshade` layer on the `dem` source,
 //   - contours   -> computed client-side from the same `dem` tiles by

@@ -6,13 +6,16 @@ node_modules/
 mtb-profile/target/
 mtb-profile/data/
 
-# Python (tools/dem/ 3D-terrain tile builder) — build artifacts, never committed
+# Python (tools/dem-to-raster-tiles-converter/ 3D-terrain tile builder) — build artifacts, never committed
 __pycache__/
 *.py[cod]
 .venv/
 
 # 3D-terrain conversion output (the dem.mbtiles artifact + any work files)
 dem_out/
+
+# Downloaded DTM10 source data (tools/dem-downloader-for-norway/download-dtm-norway.py) — large data, never committed
+dem/download_dtm_for_norway/
 
 # Build output
 dist/

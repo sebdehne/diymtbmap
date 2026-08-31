@@ -1,8 +1,8 @@
-# diymtbmap — 3D terrain tile builder (`tools/dem/`)
+# diymtbmap — 3D terrain tile builder (`tools/dem-to-raster-tiles-converter/`)
 
 Builds a `dem.mbtiles` for the diymtbmap **3D-terrain toggle** from the GeoTIFF
 elevation rasters you already have (e.g. the Norwegian **Basisdata DTM10** in
-EPSG:3045). It is a standalone, offline Python tool: **any GeoTIFF DEM in any
+EUREF89 UTM33 / EPSG:25833). It is a standalone, offline Python tool: **any GeoTIFF DEM in any
 source CRS** → a MapLibre `raster-dem` MBTiles that Martin serves and the
 MapLibre frontend reads via `map.setTerrain`.
 
@@ -23,6 +23,23 @@ container, and does not touch the Node app. It only *produces* the
 `dem.mbtiles` artifact. (Serving the tileset + the UI 3D-terrain toggle are
 implemented by the app — drop the artifact into the data volume and the map picks
 it up; see the "3D terrain (optional)" section of the top-level `README.md`.)
+
+---
+
+## Getting the source data
+
+`build-dem.py` works on GeoTIFFs you already have. To get the full Norwegian
+**DTM 10 Terrengmodell (UTM33)** as GeoTIFFs, use the companion downloader
+[`tools/dem-downloader-for-norway/`](../dem-downloader-for-norway/README.md) —
+stdlib-only Python, all 254 areas, resumable:
+
+```bash
+python3 tools/dem-downloader-for-norway/download-dtm-norway.py          # -> dem/download_dtm_for_norway/
+python3 tools/dem-to-raster-tiles-converter/build-dem.py \
+  --input  dem/download_dtm_for_norway/geotiffs \   # or the zips/ dir (auto-extracted)
+  --output dem_out/dem.mbtiles \
+  --minzoom 6 --maxzoom 11 --tilesize 512 --sea-level 0
+```
 
 ---
 
