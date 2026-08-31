@@ -7,8 +7,16 @@ import { runPipeline } from "./pipeline.js";
 import type { MartinServer } from "./martin.js";
 import { status } from "./status.js";
 import { resolveGlyphFile } from "./fonts.js";
-import { buildAppOrigin, buildMtbSourceSpec, buildTileSourceSpec, loadStyle, withTileSources } from "./style.js";
-import { expectedMtbSource } from "./martin.js";
+import {
+  buildAppOrigin,
+  buildDemSourceSpec,
+  buildMtbSourceSpec,
+  buildTileSourceSpec,
+  demSpecFor,
+  loadStyle,
+  withTileSources,
+} from "./style.js";
+import { expectedDemSource, expectedMtbSource } from "./martin.js";
 import { registerTileProxy } from "./tiles.js";
 
 const cfg = loadConfig();
@@ -49,7 +57,26 @@ inner.get("/api/status", (_req, res) => {
 // before the static handler; the 4-segment path cannot collide with the
 // 2-segment /:fontstack/:range route.
 let martin: MartinServer | undefined;
-registerTileProxy(inner, () => martin?.url);
+// When a dem tileset is served, register it so a MISSING dem tile (Martin's
+// 204 No Content) is answered with a valid flat "no data" PNG instead of an
+// empty body. An empty body makes the dem client's createImageBitmap throw
+// ("The image could not be decoded" — a map-load error in Firefox). Only the
+// dem source is registered; vector sources keep their 204 pass-through. The
+// id/encoding/tileSize are derived from the artifact, so this is computed once.
+const demSources: Record<string, { encoding: "mapbox" | "terrarium"; tileSize: number }> = (() => {
+  if (!existsSync(cfg.demMbtilesFile)) return {};
+  try {
+    const spec = demSpecFor(cfg.demMbtilesFile);
+    return {
+      [expectedDemSource(cfg.demMbtilesFile)]: { encoding: spec.encoding, tileSize: spec.tileSize },
+    };
+  } catch {
+    // A corrupt/unreadable dem file degrades to no null-tile (same as a no-DEM
+    // deployment) rather than crashing server startup.
+    return {};
+  }
+})();
+registerTileProxy(inner, () => martin?.url, demSources);
 
 // Serve the basemap style with the tile sources pointed at the app's /tiles
 // proxy (request-host-aware): the basemap source plus the step-11 MTB
@@ -70,6 +97,12 @@ inner.get("/style.json", (req, res) => {
   }
   try {
     const style = loadStyle(styleFile);
+    // The optional 3D-terrain source is injected only when the dem.mbtiles
+    // artifact is present — a no-DEM deployment serves the exact same style as
+    // before (no `dem` source), so the map is unaffected. (Contour lines are
+    // not a separate source: they are computed client-side from this same `dem`
+    // source by maplibre-contour, so there is no contours source to inject.)
+    const demPresent = existsSync(cfg.demMbtilesFile);
     res.json(
       withTileSources(
         style,
@@ -79,6 +112,9 @@ inner.get("/style.json", (req, res) => {
         // the absolute sprite/glyphs URLs resolve inside the mount (e.g.
         // /mtb/sprite, /mtb/{fontstack}/{range}.pbf).
         buildAppOrigin(req) + (cfg.basePath || ""),
+        demPresent
+          ? { id: expectedDemSource(cfg.demMbtilesFile), spec: buildDemSourceSpec(req, cfg) }
+          : undefined,
       ),
     );
   } catch (e) {

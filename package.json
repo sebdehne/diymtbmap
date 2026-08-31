@@ -14,12 +14,14 @@
     "build:web": "vite build",
     "vendor-fonts": "sh scripts/vendor-fonts.sh",
     "vendor-style": "sh scripts/vendor-style.sh",
+    "build:dem": "python3 tools/dem/build-dem.py",
+    "selftest:dem": "python3 tools/dem/build-dem.py --selftest",
     "dev": "tsx watch src/server.ts",
     "dev:web": "vite",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "tsx --test test/verify.test.ts test/build.test.ts test/martin.test.ts test/style.test.ts test/tiles.test.ts test/fonts.test.ts test/mtb-overlay.test.ts test/osm-date.test.ts"
+    "test": "tsx --test test/verify.test.ts test/build.test.ts test/martin.test.ts test/style.test.ts test/dem.test.ts test/elevation.test.ts test/layers-state.test.ts test/tiles.test.ts test/fonts.test.ts test/mtb-overlay.test.ts test/osm-date.test.ts"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
@@ -35,6 +37,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "eslint": "^10.9.1",
     "globals": "^17.11.0",
+    "maplibre-contour": "^0.1.0",
     "maplibre-gl": "^6.6.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

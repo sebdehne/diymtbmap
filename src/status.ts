@@ -27,6 +27,21 @@ export interface MartinInfo {
     /** The mtb-profile version that built the tileset (e.g. "2"), if recorded. */
     profileVersion?: string;
   };
+  /**
+   * The optional 3D-terrain (raster-dem) source, present only when a
+   * dem.mbtiles artifact was provided (step: 3D terrain). Absent = the feature
+   * is off (a no-DEM deployment is unaffected). Lets the UI know the `dem`
+   * source exists and how to read its elevation.
+   */
+  dem?: {
+    source: string;
+    /** The raster-dem encoding ("mapbox" | "terrarium") the artifact uses. */
+    encoding: "mapbox" | "terrarium";
+    /** Pixel size of each dem tile (the style source's tileSize). */
+    tileSize: number;
+    minzoom: number;
+    maxzoom: number;
+  };
 }
 
 export interface StatusSnapshot {

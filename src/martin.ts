@@ -29,6 +29,16 @@ export function expectedMtbSource(mbtilesFile: string): string {
 }
 
 /**
+ * The optional 3D-terrain source ID: Martin derives it from the DEM MBTiles
+ * file name (dem.mbtiles -> "dem"), so it follows the configured
+ * DEM_MBTILES_FILE. The served style + terrain toggle reference it by that ID.
+ */
+export function expectedDemSource(mbtilesFile: string): string {
+  const base = path.basename(mbtilesFile);
+  return base.endsWith(".mbtiles") ? base.slice(0, -".mbtiles".length) : base;
+}
+
+/**
  * Shape of Martin's /catalog document (sources under `tiles`). Verified
  * against Martin 1.14.0 (source id = MBTiles file name; for MBTiles sources
  * the entry carries content_type/content_encoding/name/description/
@@ -218,6 +228,31 @@ export class MartinServer {
           `tileset file ${file} not found — run the pipeline (or wait for it) before starting Martin`,
         );
       }
+    }
+    // The optional 3D-terrain tileset (dem.mbtiles) is NOT required: when it is
+    // absent the whole feature degrades away (no `dem` source, no toggle) and
+    // the rest of the map is unaffected. Martin's `on_invalid: warn` (set in
+    // martin.yaml) lets it start fine with a missing listed file, so we must not
+    // throw here. A present-but-unlisted file would silently disable the feature,
+    // so that specific mismatch is warned about.
+    const demPresent = existsSync(this.cfg.demMbtilesFile);
+    if (demPresent) {
+      if (paths.includes(this.cfg.demMbtilesFile)) {
+        log(
+          `optional terrain tileset present: ${this.cfg.demMbtilesFile} ` +
+            `(served as "${expectedDemSource(this.cfg.demMbtilesFile)}")`,
+        );
+      } else {
+        log(
+          `warning: ${this.cfg.demMbtilesFile} exists but is not listed in martin.yaml mbtiles — ` +
+            `the 3D terrain source will NOT be served (list it there, or fix DEM_MBTILES_FILE)`,
+        );
+      }
+    } else {
+      log(
+        `no terrain tileset at ${this.cfg.demMbtilesFile} — 3D terrain feature is off ` +
+          `(degraded; everything else unaffected)`,
+      );
     }
     // Martin 1.14's /catalog does not list the vector layers of an MBTiles
     // source, so the layers of the very file Martin opens are the ground

@@ -2,24 +2,41 @@
 #
 # Schema: https://github.com/maplibre/martin/blob/main/schemas/config.json
 #
-# Two MBTiles sources:
+# MBTiles sources:
 #   - openmaptiles.mbtiles — the stock OpenMapTiles basemap (built from the
 #     Norway PBF by Planetiler + the openmaptiles/planetiler-openmaptiles
 #     profile, tag v3.16 — the same data model/style version this app serves).
 #   - mtb.mbtiles — the dedicated low-zoom MTB overlay tileset (step 11):
 #     every way with an mtb:scale tag as layer `mtb` / attribute `mtb_scale`,
 #     z MTB_MINZOOM..14, built by the mtb-profile jar.
+#   - dem.mbtiles — the OPTIONAL 3D-terrain tileset (step: 3D terrain): a
+#     `raster-dem` source (image/png tiles packed to elevation), built by the
+#     standalone tools/dem/build-dem.py converter and dropped into the data volume.
+#     NOT built by this app. It also drives the client-side hillshade + contour
+#     lines (maplibre-contour), so there is NO separate contour tileset.
 #
-# Martin derives each source ID from the file name -> "openmaptiles" +
-# "mtb", which is what the basemap style, the injected MTB style source, and
-# the overlay reference.
+# Martin derives each source ID from the file name -> "openmaptiles" + "mtb"
+# + "dem", which is what the basemap style, the injected MTB style source,
+# the injected dem style source, and the overlays reference.
 #
-# The paths must match MBTILES_FILE (DATA_DIR/openmaptiles.mbtiles) and
-# MTB_MBTILES_FILE (DATA_DIR/mtb.mbtiles); the app verifies this at startup
-# and fails fast on a mismatch.
+# The required paths (openmaptiles, mtb) must match MBTILES_FILE
+# (DATA_DIR/openmaptiles.mbtiles) and MTB_MBTILES_FILE (DATA_DIR/mtb.mbtiles);
+# the app verifies these at startup and fails fast on a mismatch. The dem
+# (DATA_DIR/dem.mbtiles) path is OPTIONAL: when the file is absent the 3D
+# terrain + hillshade + contour feature degrades away (no `dem` source, no
+# toggle) and everything else is unchanged.
+#
+# `on_invalid: warn` is what makes that optional source safe: by default Martin
+# ABORTS startup when a listed MBTiles file is missing (a `PathError` tile-source
+# warning is escalated to a fatal error under the default `abort` policy). With
+# `warn`, a missing dem.mbtiles is logged and skipped, so a no-DEM deployment
+# still starts. (The app's own startup verification still fails fast on a
+# missing REQUIRED source — openmaptiles/mtb — so a real misconfig is caught.)
 #
 # The listen address is passed on the command line by the orchestrator
 # (MARTIN_BIND / MARTIN_PORT), so it is not set here.
+on_invalid: warn
 mbtiles:
   - /data/openmaptiles.mbtiles
   - /data/mtb.mbtiles
+  - /data/dem.mbtiles

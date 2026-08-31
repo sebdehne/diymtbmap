@@ -1,0 +1,13 @@
+# build-dem.py — Python dependencies
+#
+# GDAL + Python bindings (`osgeo`) are NOT pip-installable as a reliable wheel;
+# install them from your OS package manager first (see README.md):
+#   macOS (Homebrew):   brew install gdal python@3.12
+#   Debian/Ubuntu:      sudo apt install gdal-bin python3-gdal
+#
+# Then install the pip-side dependency:
+numpy>=1.26,<3
+
+# Optional — only needed to run the test suite with `pytest`:
+#   pytest>=8
+# (The tests also run standalone via `python3 tests/test_*.py`, no pytest needed.)

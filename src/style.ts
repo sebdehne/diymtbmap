@@ -5,7 +5,11 @@ import { PbfReader } from "pbf";
 import { VectorTile } from "@mapbox/vector-tile";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
-import { EXPECTED_SOURCE, expectedMtbSource } from "./martin.js";
+import {
+  EXPECTED_SOURCE,
+  expectedDemSource,
+  expectedMtbSource,
+} from "./martin.js";
 import {
   MTB_OVERLAY_ATTR,
   MTB_OVERLAY_LAYER,
@@ -13,8 +17,10 @@ import {
   REQUIRED_LAYERS,
   REQUIRED_MAXZOOM,
   readDeclaredFields,
+  readDemSpec,
   readMtbBounds,
   readTilesetView,
+  type DemSpec,
   type MtbHit,
 } from "./verify.js";
 
@@ -343,6 +349,25 @@ export interface TileSourceSpec {
   maxzoom?: number;
 }
 
+/**
+ * The source-spec fragment for the optional 3D-terrain (`raster-dem`) source.
+ * Unlike the vector sources, a `raster-dem` source MUST carry the artifact's
+ * `tileSize` (pixel size — a mismatch decodes garbage elevation) and `encoding`
+ * (the RGB packing — a mismatch decodes the wrong values). Both are read from
+ * the dem.mbtiles metadata so they always match the artifact. `minzoom`/
+ * `maxzoom` bound the pyramid (the artifact only has tiles in that range).
+ */
+export interface DemSourceSpec {
+  url?: string;
+  tiles?: string[];
+  minzoom: number;
+  maxzoom: number;
+  /** Pixel size of each dem tile (must equal the artifact's tileSize). */
+  tileSize: number;
+  /** MapLibre raster-dem encoding (must equal the artifact's packing). */
+  encoding: "mapbox" | "terrarium";
+}
+
 /** The source-spec fragment for the basemap (request-host-aware). */
 export function buildTileSourceSpec(req: IncomingRequestLike, cfg: Config): TileSourceSpec {
   if (cfg.tileSourceUrl) return { url: cfg.tileSourceUrl };
@@ -367,6 +392,39 @@ export function buildMtbSourceSpec(req: IncomingRequestLike, cfg: Config): TileS
   };
 }
 
+/**
+ * The dem.mbtiles artifact is static at runtime (like the basemap/mtb
+ * artifacts), so its spec is read from the file once and cached — /style.json
+ * is requested once per map load, but we avoid a SQLite open per request.
+ */
+let demSpecCache: { file: string; spec: DemSpec } | undefined;
+export function demSpecFor(file: string): DemSpec {
+  if (demSpecCache && demSpecCache.file === file) return demSpecCache.spec;
+  const spec = readDemSpec(file);
+  demSpecCache = { file, spec };
+  return spec;
+}
+
+/**
+ * The source-spec fragment for the optional 3D-terrain source, always through
+ * the app's `/tiles` proxy: the dem artifact is local (served by this Martin),
+ * never an external TileJSON endpoint, so `TILE_SOURCE_URL` does not apply to
+ * it. Carries the artifact's own `tileSize` / `encoding` / `minzoom` /
+ * `maxzoom` (read from its metadata) so MapLibre decodes the elevation
+ * correctly — a tileSize or encoding mismatch would silently mis-decode.
+ */
+export function buildDemSourceSpec(req: IncomingRequestLike, cfg: Config): DemSourceSpec {
+  const id = expectedDemSource(cfg.demMbtilesFile);
+  const spec = demSpecFor(cfg.demMbtilesFile);
+  return {
+    tiles: [`${buildAppOrigin(req)}${cfg.basePath || ""}/tiles/${id}/{z}/{x}/{y}`],
+    minzoom: spec.minzoom,
+    maxzoom: spec.maxzoom,
+    tileSize: spec.tileSize,
+    encoding: spec.encoding,
+  };
+}
+
 function isAbsoluteUrl(u: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(u);
 }
@@ -384,13 +442,19 @@ function isAbsoluteUrl(u: string): boolean {
  * other part of the style (including the inert `attribution` source, which
  * carries the OMT/OSM credit) is left untouched, and the input object is not
  * mutated. The vendored style never declares the MTB source (it is
- * app-specific), so it is always injected.
- */
+ * app-specific), so it is always injected. The optional `dem` (3D-terrain)
+  * source is injected only when provided — when omitted the served style has no
+  * `dem` source and the terrain toggle degrades away (a no-DEM deployment is
+  * unaffected). Contour lines are NOT a separate source: they are computed
+  * client-side from this same `dem` source by maplibre-contour (see
+  * shared/elevation.js), so there is no `contours` vector source to inject.
+  */
 export function withTileSources(
   style: StyleDoc,
   basemap: TileSourceSpec,
   mtb: { id: string; spec: TileSourceSpec },
   appOrigin?: string,
+  dem?: { id: string; spec: DemSourceSpec },
 ): StyleDoc {
   const sources = style.sources ?? {};
   const target = sources[EXPECTED_SOURCE];
@@ -409,6 +473,7 @@ export function withTileSources(
       ...sources,
       [EXPECTED_SOURCE]: { ...base, ...basemap },
       [mtb.id]: { type: "vector", ...mtb.spec },
+      ...(dem ? { [dem.id]: { type: "raster-dem", ...dem.spec } } : {}),
     },
   };
   if (appOrigin !== undefined) {
@@ -608,6 +673,109 @@ export async function verifyMtbServing(cfg: Config, martinUrl: string): Promise<
       `(${hits.map((h) => `z${h.zoom}/${h.x}/${h.y} ${JSON.stringify(h.properties)}`).join("; ")})`,
   );
   return { source, hits };
+}
+
+// ---------------------------------------------------------------------------
+// 3D-terrain (dem) serving check (tiles over HTTP)
+// ---------------------------------------------------------------------------
+
+export interface DemServeResult {
+  source: string;
+  tileSize: number;
+  encoding: "mapbox" | "terrarium";
+  /** The artifact's pyramid range (for the status / UI). */
+  minzoom: number;
+  maxzoom: number;
+}
+
+/** The 8-byte PNG file signature (`\x89PNG\r\n\x1a\n`). */
+const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Optional 3D-terrain gate: the dem source must actually be SERVED — a real
+ * PNG tile of the artifact's exact `tileSize`, fetched over HTTP from the tile
+ * server (the artifact spec `readDemSpec` checks the file; this checks the
+ * serving chain: Martin config, source id, routing, PNG output). Picks the
+ * tile at the artifact-bounds center at a mid-pyramid zoom (the artifact has a
+ * full pyramid over its bounds, so that tile is guaranteed present).
+ */
+export async function verifyDemServing(cfg: Config, martinUrl: string): Promise<DemServeResult> {
+  const source = expectedDemSource(cfg.demMbtilesFile);
+  const spec = demSpecFor(cfg.demMbtilesFile);
+  const [west, south, east, north] = spec.bounds ?? [0, 0, 0, 0];
+  const centerLon = (west + east) / 2;
+  const centerLat = (south + north) / 2;
+  const zoom = clamp(Math.round((spec.minzoom + spec.maxzoom) / 2), spec.minzoom, spec.maxzoom);
+  const size = 1 << zoom;
+  const x = clamp(lonToTile(centerLon, zoom), 0, size - 1);
+  const y = clamp(latToTile(centerLat, zoom), 0, size - 1);
+
+  const res = await fetch(`${martinUrl}/${source}/${zoom}/${x}/${y}`, {
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `dem tile ${source}/${zoom}/${x}/${y} returned HTTP ${res.status} — the tile server is not ` +
+        `serving the 3D terrain source (check martin.yaml lists ${cfg.demMbtilesFile})`,
+    );
+  }
+  const raw = new Uint8Array(await res.arrayBuffer());
+  if (!startsWith(raw, PNG_SIGNATURE)) {
+    throw new Error(
+      `dem tile ${source}/${zoom}/${x}/${y} is not a PNG (first bytes: ${hexPrefix(raw)}) — ` +
+        `wrong tile format or a broken proxy`,
+    );
+  }
+  const ihdr = readIhdr(raw);
+  if (ihdr === null) {
+    throw new Error(`dem tile ${source}/${zoom}/${x}/${y} has no IHDR chunk — not a valid PNG`);
+  }
+  if (ihdr.width !== spec.tileSize || ihdr.height !== spec.tileSize) {
+    throw new Error(
+      `dem tile ${source}/${zoom}/${x}/${y} is ${ihdr.width}x${ihdr.height}px but the artifact is ` +
+        `${spec.tileSize}px — the style's tileSize would mis-decode the elevation`,
+    );
+  }
+  log(
+    `dem serving OK: source "${source}" serves a ${spec.tileSize}px PNG over HTTP at ` +
+      `z${zoom}/${x}/${y} (encoding=${spec.encoding})`,
+  );
+  return {
+    source,
+    tileSize: spec.tileSize,
+    encoding: spec.encoding,
+    minzoom: spec.minzoom,
+    maxzoom: spec.maxzoom,
+  };
+}
+
+function startsWith(buf: Uint8Array, sig: Uint8Array): boolean {
+  if (buf.length < sig.length) return false;
+  for (let i = 0; i < sig.length; i++) if (buf[i] !== sig[i]) return false;
+  return true;
+}
+
+function hexPrefix(buf: Uint8Array): string {
+  const n = Math.min(8, buf.length);
+  return Array.from(buf.subarray(0, n))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
+}
+
+/**
+ * Parses the PNG IHDR chunk (it must be the FIRST chunk) -> width/height, or
+ * null when absent. PNG: 8-byte signature, then per-chunk 4-byte length +
+ * 4-byte type + payload + 4-byte CRC; IHDR's payload starts with the
+ * big-endian uint32 width then height.
+ */
+function readIhdr(buf: Uint8Array): { width: number; height: number } | null {
+  if (buf.length < 8 + 8 + 8) return null; // signature + chunk header + width+height
+  const type = buf.subarray(12, 16);
+  if (type[0] !== 0x49 || type[1] !== 0x48 || type[2] !== 0x44 || type[3] !== 0x52) {
+    return null; // not "IHDR"
+  }
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  return { width: view.getUint32(16, false), height: view.getUint32(20, false) };
 }
 
 /**

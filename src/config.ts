@@ -26,7 +26,16 @@ export interface Config {
   mtbProfileJar: string;
   mtbMbtilesFile: string;
   mtbHeapMb: number;
-  planetilerSourcesDir: string;
+  /**
+   * Optional 3D-terrain tileset (raster DEM, `dem.mbtiles`): a `raster-dem`
+   * MBTiles source the web UI can toggle for real elevation. Built by the
+   * standalone `tools/dem/build-dem.py` converter (Option B, host-side) and dropped
+   * into the data volume — it is NOT built by this app. When the file is
+   * absent the whole feature degrades away (no `dem` source, no toggle) and
+   * everything else is unchanged.
+   */
+   demMbtilesFile: string;
+   planetilerSourcesDir: string;
   planetilerTmpDir: string;
   martinBind: string;
   martinPort: number;
@@ -123,6 +132,10 @@ export function loadConfig(): Config {
     // Where the mtb overlay tileset is written (separate from the basemap).
     mtbMbtilesFile:
       process.env.MTB_MBTILES_FILE ?? path.join(dataDir, "mtb.mbtiles"),
+    // Optional 3D-terrain tileset. Built externally by tools/dem/build-dem.py into
+    // this file; the app only serves it. Absent file = feature off (degraded).
+    demMbtilesFile:
+      process.env.DEM_MBTILES_FILE ?? path.join(dataDir, "dem.mbtiles"),
     // Heap for the mtb build. It only reads ways (no shapefile/Natural Earth
     // stage), so it needs far less than the basemap build.
     mtbHeapMb: envInt("MTB_HEAP_MB", 2048),

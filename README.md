@@ -1,4 +1,4 @@
-# Map viewer for Mountain bike trails 
+# Map viewer for Mountain bike trails (3d supported) 
 
 A self-contained web app (runs in a **single container**).
 On first start it downloads the latest [OpenStreetMap](https://www.openstreetmap.org)
@@ -27,6 +27,15 @@ builds [OpenMapTiles](https://openmaptiles.org/) vector tiles with
   re-runs skip the download + build unless `FORCE_REIMPORT=1`.
 - **Sub-path friendly** — can be mounted under a reverse-proxy path (e.g. `/mtb/`)
   without touching other paths on the host.
+- **Single layers panel** (top-right) — one round layers icon expands into all
+  the layer toggles: the MTB trail groups (each with an opacity slider) and,
+  when a `dem.mbtiles` elevation tileset is in the data volume, an **Elevation**
+  section with **3D view** (MapLibre `setTerrain`, default on), **hillshade**
+  (default on) and **contour lines** (default on) from that one source. Contours
+  are computed client-side in the browser by `maplibre-contour` from the same
+   `dem` tiles, so there is no separate contour tileset. The tileset is built by
+   a standalone converter (`tools/dem/`), not the container; without the artifact the
+  Elevation section is simply absent and the map is unchanged.
 
 ---
 
@@ -131,6 +140,7 @@ full list.
 | `MBTILES_FILE` | `/data/openmaptiles.mbtiles` | Basemap tileset artifact. |
 | `MTB_MINZOOM` | `3` | MTB overlay start zoom (build arg, baked in). |
 | `MTB_MBTILES_FILE` | `/data/mtb.mbtiles` | MTB overlay tileset artifact. |
+| `DEM_MBTILES_FILE` | `/data/dem.mbtiles` | **Optional** elevation tileset for the layers panel's Elevation section — 3D view + hillshade + contour lines (absent = no Elevation section). |
 | `PLANETILER_HEAP_MB` | `4096` | Java heap for the basemap build (768 MB OOMs). |
 | `MTB_HEAP_MB` | `2048` | Java heap for the MTB build (much smaller). |
 | `PLANETILER_JAR` | `/opt/planetiler/planetiler-openmaptiles.jar` | Basemap profile jar. |
@@ -151,6 +161,56 @@ Example — serve under a sub-path and force a rebuild:
 docker run -d --name diymtbmap -p 8080:8080 -v diymtbmap-data:/data \
   -e BASE_PATH=/mtb -e FORCE_REIMPORT=1 diymtbmap
 ```
+
+### Elevation: 3D terrain, hillshade & contour lines (optional)
+
+The map can render **real 3D terrain**, **hillshade**, and **contour lines** from
+a single elevation tileset. It is optional and degradable: without the artifact
+the layers panel shows no Elevation section and the map is unchanged.
+
+All three are driven by the **one** `dem` source. 3D relief and hillshade are
+native MapLibre layers; the contour lines are computed **client-side** in the
+browser by [`maplibre-contour`](https://github.com/onthegomap/maplibre-contour)
+from the same `dem` tiles (20 m minor / 100 m major, labelled). There is no
+separate contour tileset to build or serve. (The earlier standalone `contours/`
+vector pipeline was retired with this change and removed from the repo.)
+
+The elevation tileset (`dem.mbtiles`, a MapLibre `raster-dem` MBTiles of PNG
+elevation tiles) is built **outside the container** by the standalone converter
+ in [`tools/dem/`](tools/dem/README.md). The image deliberately has no GDAL/Python, so the
+conversion runs on your host (Option B). Then:
+
+1. **Install the tools** — Python 3 + GDAL (`osgeo`) + `numpy`. Per-OS install
+    steps are in [`tools/dem/README.md`](tools/dem/README.md).
+2. **Prove the install** with a synthetic round-trip (no real data needed):
+
+   ```sh
+    npm run selftest:dem          # = python3 tools/dem/build-dem.py --selftest
+   ```
+3. **Convert your GeoTIFF DEM** into `dem.mbtiles` (any source CRS — it is
+   reprojected to Web Mercator):
+
+   ```sh
+   npm run build:dem -- --input /path/to/your-dem-tiles --output /data/dem.mbtiles \
+       --encoding mapbox --minzoom 6 --maxzoom 11 --tilesize 512
+   ```
+
+    (`npm run build:dem -- <args>` just runs `python3 tools/dem/build-dem.py <args>`;
+    the full CLI and output contract are in `tools/dem/README.md`.)
+
+4. **Make sure the app sees it.** The default path is `$DATA_DIR/dem.mbtiles`
+   (override with `DEM_MBTILES_FILE`). The file name sets Martin's source id
+   (`dem.mbtiles` → `dem`); `martin.yaml` already lists `/data/dem.mbtiles`, so a
+   custom name must be added there too and `DEM_MBTILES_FILE` kept in sync.
+
+On the next start the app verifies the tile is served as a decodable PNG, injects
+a `raster-dem` source into the style, and the **layers panel** (top-right, the
+round layers icon) gains an **Elevation** section with three toggles: **3D view**
+(relief), **hillshade**, and **contour lines** — all default ON, each on its own
+row. Flip any of them off for the flat basemap / no relief shading / no contours.
+Your choices persist across reloads. A deployment without `dem.mbtiles` is
+byte-for-byte the same map as before — no Elevation section, no `dem` source, no
+hillshade or contours (the trail toggles are unaffected).
 
 ### Sub-path deployment (reverse proxy)
 
@@ -227,6 +287,8 @@ Useful scripts:
 | `npm run lint` | ESLint. |
 | `npm run typecheck` | TypeScript type check. |
 | `npm run vendor-style` / `vendor-fonts` | Build/fetch the vendored style + glyph fonts. |
+ | `npm run build:dem -- <args>` | Run the 3D-terrain converter (`python3 tools/dem/build-dem.py <args>`). |
+| `npm run selftest:dem` | Synthetic round-trip self-test of the converter (proves the GDAL install). |
 
 E2E harnesses live in `scripts/` (e.g. `e2e-check.ts`, `e2e-martin.ts`,
 `e2e-mtb.ts`, `e2e-style.ts`) and exercise the real build + serving chain.

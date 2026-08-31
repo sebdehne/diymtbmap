@@ -1,5 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Map, NavigationControl, ScaleControl, GeolocateControl, FullscreenControl } from "maplibre-gl";
+import { Map, NavigationControl, ScaleControl, GeolocateControl, FullscreenControl, addProtocol } from "maplibre-gl";
+// maplibre-contour's default export (the mlcontour namespace with DemSource).
+// It is a browser-only bundler entry (Vite resolves the `module` condition), so
+// it is imported here in the web bundle — never from the Node test suite.
+import mlcontour from "maplibre-contour";
+import {
+  CONTOUR_SOURCE_ID,
+  contourProtocolOptions,
+  hillshadeLayerSpec,
+  contourLineSpec,
+  contourLabelSpec,
+  applyHillshadeVisibility,
+  applyContourVisibility,
+} from "../../shared/elevation.js";
 import {
   MTB_MINZOOM,
   MTB_SOURCE,
@@ -10,8 +23,23 @@ import {
   mtbOverlayLayers,
 } from "../../shared/mtb-overlay.js";
 import { makeInfoControl } from "./components/InfoControl.jsx";
-import { makeOverlayControl } from "./components/OverlayControl.jsx";
-import { readOverlayState } from "./overlay-state.js";
+import { makeLayerControl } from "./components/LayerControl.jsx";
+import { readLayersState } from "./layers-state.js";
+import { DEM_SOURCE, applyTerrain } from "../../shared/terrain.js";
+
+// A failed style load (style.json / base tiles) is fatal. But a failure to
+// decode an optional dem raster tile — the native raster-dem hillshade, or the
+// maplibre-contour worker's createImageBitmap — only means the elevation layers
+// are missing; the basemap and MTB overlays still render. Some browsers (e.g.
+// Firefox) reject dem tiles that others decode, so we must not report the whole
+// map as failed in that case. Match the browser-thrown image-decode errors.
+function isImageDecodeError(ev) {
+  const err = ev?.error ?? ev;
+  const name = String(err?.name ?? "");
+  const msg = String(err?.message ?? "");
+  if (name === "InvalidStateError" || name === "EncodingError" || name === "ImageDecodeError") return true;
+  return /could not be decoded|image could not|createimagebitmap|failed to decode/i.test(msg);
+}
 
 export default function MapView({ status }) {
   const containerRef = useRef(null);
@@ -23,6 +51,14 @@ export default function MapView({ status }) {
   const mtb = status?.martin?.mtb;
   const overlaySource = mtb?.source ?? MTB_SOURCE;
   const overlayMinzoom = mtb?.minzoom ?? MTB_MINZOOM;
+
+  // The optional 3D-terrain source (step: 3D terrain): present only when a
+  // dem.mbtiles was served. Its source id follows DEM_MBTILES_FILE (e.g.
+  // "terrain-7"); when absent the layers panel shows no Elevation section and
+  // the map is flat and unchanged, so a no-DEM deployment is unaffected.
+  const dem = status?.martin?.dem;
+  const hasDem = dem !== undefined;
+  const demSource = dem?.source ?? DEM_SOURCE;
 
   // Initial view (workstream D): prefer the auto-detected center/bounds the
   // pipeline read from the tileset (so any country's extract opens on
@@ -52,6 +88,13 @@ export default function MapView({ status }) {
       // stretches the z14 vector tiles client-side and never requests deeper
       // tiles, so zooming to the default max stays fully rendered.
       maxZoom: 22,
+      // 3D-terrain tilt: MapLibre caps the camera at 60° by default, which is
+      // too shallow to read the relief as 3D. Raise the ceiling to 85° and allow
+      // tilting via a two-finger / trackpad drag. The map itself stays top-down
+      // (0°) until the visitor tilts it — the terrain toggle (shared/terrain.js)
+      // never moves the camera; these options just set the ceiling + gesture.
+      maxPitch: 85,
+      pitchWithGesture: true,
       ...initial,
     });
     // Debug hook (console / CDP): inspect map state, force zooms, read tiles.
@@ -61,9 +104,11 @@ export default function MapView({ status }) {
     m.addControl(new NavigationControl(), "top-right");
     m.addControl(new GeolocateControl({ positionOptions: { enableHighAccuracy: true } }), "top-right");
     m.addControl(new FullscreenControl(), "top-right");
-    // The overlay switcher sits right under the fullscreen button: collapsed
-    // to a round layers icon, one click opens the choose-overlays panel.
-    m.addControl(makeOverlayControl(m), "top-right");
+    // The single layers panel sits right under the fullscreen button: collapsed
+    // to a round layers icon, one click opens the panel. It holds the MTB trail
+    // toggles + opacity sliders (always) and — only when a dem source was
+    // served — the 3D view / hillshade / contour lines toggles.
+    m.addControl(makeLayerControl(m, { hasDem, dem }), "top-right");
     m.addControl(new ScaleControl({ maxWidth: 120, unit: "metric" }), "bottom-left");
     // The info panel now carries the status (data date, country, legends).
     m.addControl(makeInfoControl(status), "bottom-right");
@@ -73,38 +118,102 @@ export default function MapView({ status }) {
       // so the natural/bike-park toggles have layers to show and hide.
       for (const layer of mtbOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer);
       for (const layer of bikeParkOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer);
-      // Restore the visitor's last choice (defaults: both groups ON at half
-      // opacity). The layers only exist after `load`, so this is where the
-      // persisted visibility + opacity actually take effect.
-      const state = readOverlayState();
+      // Restore the visitor's layer choices (defaults: trails ON at half
+      // opacity, 3D view ON, hillshade ON, contour lines ON) from the single
+      // persisted state the layers panel writes. The layers only exist after
+      // `load`, so this is where the persisted state actually takes effect.
+      const state = readLayersState();
       applyOverlayVisibility(m, state);
       applyOverlayOpacity(m, state);
+      if (hasDem) {
+        // 3D terrain state: apply it now that the style document is loaded
+        // (the `load` event guarantees that; setTerrain only needs the
+        // document, not settled sources). It survives the contour
+        // source/layers added below — only a full style reload resets it.
+        applyTerrain(m, state.terrain, state.exaggeration, demSource);
+        // Elevation overlays: hillshade (native) + contour lines (client-side via
+        // maplibre-contour), BOTH derived from the one dem raster-dem source. We
+        // reuse the dem source's own tile URL / encoding / maxzoom (read from the
+        // served style spec) so the DemSource always matches the artifact — no
+        // separate contour tileset is built or fetched.
+        const demSpec = m.getSource(demSource);
+        const demTileUrl =
+          demSpec && Array.isArray(demSpec.tiles) && demSpec.tiles[0] ? demSpec.tiles[0] : undefined;
+        if (demTileUrl) {
+          const demMaxzoom =
+            typeof demSpec.maxzoom === "number" ? demSpec.maxzoom : 11;
+          const demSrc = new mlcontour.DemSource({
+            url: demTileUrl,
+            encoding: demSpec.encoding ?? "mapbox",
+            maxzoom: demMaxzoom,
+            worker: true,
+            cacheSize: 100,
+          });
+          // Register maplibre-contour's contour protocol on the maplibre module.
+          demSrc.setupMaplibre({ addProtocol });
+          // The contour vector source: its tiles are the protocol URL, which
+          // maplibre-contour serves as MVT isolines computed on the fly.
+          m.addSource(CONTOUR_SOURCE_ID, {
+            type: "vector",
+            tiles: [demSrc.contourProtocolUrl(contourProtocolOptions())],
+            // Overzoom the (z<=demMaxzoom) contour tiles a bit past the dem's
+            // native range so the map's max zoom stays rendered.
+            maxzoom: demMaxzoom + 4,
+          });
+          // Draw order: hillshade first, then the contour lines, then labels.
+          m.addLayer(hillshadeLayerSpec(demSource));
+          m.addLayer(contourLineSpec(CONTOUR_SOURCE_ID));
+          m.addLayer(contourLabelSpec(CONTOUR_SOURCE_ID));
+          // The elevation layers only exist now: apply their persisted
+          // visibility (their helpers only check for the layer, so an early
+          // call elsewhere is a safe no-op).
+          applyHillshadeVisibility(m, state.hillshade);
+          applyContourVisibility(m, state.contour);
+        }
+      }
       setBanner(null);
     });
 
     m.on("error", (ev) => {
-      // Tile errors after load are normal-ish; a failed style load is not.
+      // A failed style load is fatal; a dem-tile image-decode failure is not
+      // (only the elevation overlays are lost), so surface it as a soft warning
+      // rather than "map failed to load" — the basemap + MTB overlay still work.
+      if (isImageDecodeError(ev)) {
+        setBanner({
+          kind: "warn",
+          text: "Elevation (3D terrain, hillshade, contour lines) is unavailable in this browser — the map still works.",
+        });
+        return;
+      }
+      // Other pre-load errors (e.g. style.json fetch) are a genuine map failure.
       if (!m.isStyleLoaded()) {
         setBanner({
           kind: "fail",
           text: "map failed to load: " + (ev.error?.message ?? "unknown error") + " — see server logs",
         });
+        return;
       }
+      // Post-load errors are not fatal (basemap works) but must not be silent:
+      // e.g. a layer spec that fails MapLibre's style validation makes `addLayer`
+      // abort and fires ONLY this error event — logging it keeps "a layer is
+      // mysteriously missing" diagnosable from the console.
+      console.warn("[diymtbmap] map error:", ev.error?.message ?? String(ev.error ?? ev));
     });
 
     return () => {
       window.__map = undefined;
       m.remove();
     };
-    // The map is rebuilt only if the overlay source/minzoom change; the
-    // status-driven initial view and info-panel status are fixed for the
-    // session (both are settled before the map mounts, on state === "ready").
-  }, [overlaySource, overlayMinzoom]);
+    // The map is rebuilt only if the overlay source/minzoom or the presence of
+    // a dem source changes; the status-driven initial view and info-panel
+    // status are fixed for the session (settled before the map mounts, on
+    // state === "ready").
+  }, [overlaySource, overlayMinzoom, hasDem, demSource]);
 
   return (
     <>
       <div ref={containerRef} id="map" />
-      {banner && <div className={"mapstatus" + (banner.kind === "fail" ? " fail" : "")}>{banner.text}</div>}
+      {banner && <div className={"mapstatus" + (banner.kind === "fail" ? " fail" : banner.kind === "warn" ? " warn" : "")}>{banner.text}</div>}
     </>
   );
 }

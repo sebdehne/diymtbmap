@@ -400,6 +400,52 @@ function parseCenter(raw: string | undefined): [number, number, number] | null {
   return [parts[0]!, parts[1]!, parts[2]!];
 }
 
+/** MapLibre `raster-dem` encoding the dem.mbtiles artifact was packed with. */
+export type DemEncoding = "mapbox" | "terrarium";
+
+/**
+ * The dem.mbtiles artifact spec the served style must declare to match it:
+ * the tile pixel size, the raster-dem packing, the zoom range, and (for
+ * locating a tile to verify) the bounds. Written by tools/dem/build-dem.py.
+ */
+export interface DemSpec {
+  bounds: [number, number, number, number] | null;
+  minzoom: number;
+  maxzoom: number;
+  /** Pixel size of each dem tile — the style source's `tileSize` must equal it. */
+  tileSize: number;
+  /** The raster-dem packing — the style source's `encoding` must equal it. */
+  encoding: DemEncoding;
+}
+
+/**
+ * Reads the dem.mbtiles artifact's serving spec (bounds, minzoom, maxzoom,
+ * tileSize, encoding) from its MBTiles metadata. Any field the metadata lacks
+ * falls back to the documented artifact contract (mapbox, 512 px, z6–z11), so
+ * a slightly older artifact still serves. Cheap metadata-only read.
+ */
+export function readDemSpec(file: string): DemSpec {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    return {
+      bounds: parseBounds(readMetaValue(db, "bounds")),
+      minzoom: readMetaInt(db, "minzoom", 6),
+      maxzoom: readMetaInt(db, "maxzoom", 11),
+      tileSize: readMetaInt(db, "tileSize", 512),
+      encoding: (readMetaValue(db, "encoding") ?? "mapbox") as DemEncoding,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function readMetaInt(db: Database.Database, name: string, fallback: number): number {
+  const raw = readMetaValue(db, name);
+  if (raw === undefined) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
 export interface MtbTilesetResult {
   format: string;
   minzoom: number;

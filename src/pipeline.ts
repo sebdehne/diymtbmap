@@ -19,7 +19,11 @@ import {
   verifyMtbMbtiles,
 } from "./verify.js";
 import { readOsmDataDate } from "./osm-date.js";
-import { verifyMtbServing, verifyStyleServing } from "./style.js";
+import {
+  verifyDemServing,
+  verifyMtbServing,
+  verifyStyleServing,
+} from "./style.js";
 
 /**
  * Full startup pipeline:
@@ -221,6 +225,24 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
   status.update({ message: "Verifying MTB overlay serving" });
   await verifyMtbServing(cfg, martin.url);
 
+  // 3D-terrain (OPTIONAL): when a dem.mbtiles artifact is present, the dem
+  // source must actually be SERVED (a decodable PNG of the artifact's
+  // tileSize) — fail fast now, not in the browser. Absent artifact = the
+  // feature is simply off; a no-DEM deployment is unaffected.
+  let demInfo:
+    | {
+        source: string;
+        encoding: "mapbox" | "terrarium";
+        tileSize: number;
+        minzoom: number;
+        maxzoom: number;
+      }
+    | null = null;
+  if (existsSync(cfg.demMbtilesFile)) {
+    status.update({ message: "Verifying 3D terrain serving" });
+    demInfo = await verifyDemServing(cfg, martin.url);
+  }
+
   // Workstream A + D: the OSM data date and the tileset's own bounds/center,
   // so the UI can show "data as of …" and open the map on the extract's
   // extent instead of a hardcoded Norway view.
@@ -247,6 +269,7 @@ export async function runPipeline(cfg: Config): Promise< MartinServer> {
         hasBikePark: mtbHasBikePark,
         profileVersion: mtbProfileVersion ?? undefined,
       },
+      dem: demInfo ?? undefined,
     },
   });
   return martin;
