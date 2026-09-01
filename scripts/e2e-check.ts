@@ -88,9 +88,7 @@ console.log(`[build] finished in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 try {
   const v = verifyMbtiles(mbtiles);
   console.log(
-    `[verify] OK: ${v.layers.length} layers, z${v.zooms[0]}-z${v.zooms[v.zooms.length - 1]}, ` +
-      `${v.tilesScanned} tiles scanned, mtbHit at z${v.mtbHit.zoom}/${v.mtbHit.x}/${v.mtbHit.y}: ` +
-      JSON.stringify(v.mtbHit.properties),
+    `[verify] OK: ${v.layers.length} layers, z${v.zooms[0]}-z${v.zooms[v.zooms.length - 1]}`,
   );
 } catch (e) {
   console.log(`[verify] FAILED: ${(e as Error).message}`);

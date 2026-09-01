@@ -150,3 +150,23 @@ a { color: #1565c0; }
 /* Info panel: per-group legend block + data date. */
 .mtb-legend { margin-bottom: .5rem; }
 .mtb-info-date { margin-top: .2rem; color: #666; font-size: .7rem; }
+
+/* Info panel: on-demand re-import button + one-line status. */
+.mtb-reimport { margin-top: .45rem; }
+.mtb-reimport-button {
+  width: 100%;
+  padding: .35rem .5rem;
+  font-family: inherit;
+  font-size: .72rem;
+  color: #222;
+  background: #f7f5f0;
+  border: 1px solid #c7c2b6;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.mtb-reimport-button:hover { background: #efede6; }
+.mtb-reimport-button:disabled { opacity: .65; cursor: default; }
+.mtb-reimport-msg { margin-top: .3rem; font-size: .68rem; color: #666; }
+.mtb-reimport-msg.error { color: #b71c1c; }
+.mtb-reimport-msg.success { color: #2e7d32; }
+.mtb-reimport-msg.info { color: #1565c0; }

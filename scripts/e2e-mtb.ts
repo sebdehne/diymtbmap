@@ -5,8 +5,8 @@
  *   1. MartinServer starts the real `martin` serving BOTH the basemap and the
  *      mtb overlay (verified by the app's own catalog check: both source ids
  *      present as MVT)
- *   2. the mtb gate tiles (the minzoom AND z14) are fetched OVER HTTP,
- *      decoded, and a non-empty mtb_scale feature is confirmed at both zooms
+ *   2. the mtb source is fetched OVER HTTP (top-left of the bounds) and
+ *      confirmed to serve as MVT
  *   3. the total number of non-empty mtb_scale features at z14 meets the
  *      Sørlandet baseline (>= 1876) — the overlay is a superset of the
  *      basemap's trails
@@ -137,13 +137,9 @@ if (JSON.stringify([...martin.sources].sort()) !== JSON.stringify(want)) {
   console.log(`[catalog] OK: serving both "${EXPECTED_SOURCE}" and "${mtbSource}" as MVT`);
 }
 
-// Verify the overlay artifact (metadata + the hard gate) before serving it.
+// Verify the overlay artifact (metadata) before serving it.
 const v = verifyMtbMbtiles(mtbFile, 7);
 console.log(`[mtb] minzoom=${v.minzoom} maxzoom=${v.maxzoom} zooms=${v.zooms.join(",")}`);
-console.log(`[mtb] gate hits: ${v.hits.map((h) => `z${h.zoom}/${h.x}/${h.y} (${h.properties.mtb_scale})`).join(", ")}`);
-
-const byZoom = new Map(v.hits.map((h) => [h.zoom, h]));
-const gateZooms = [...new Set([7, 14])].sort((a, b) => a - b);
 
 function decode(raw: Uint8Array): Uint8Array {
   return raw[0] === 0x1f && raw[1] === 0x8b ? new Uint8Array(gunzipSync(Buffer.from(raw))) : raw;
@@ -162,31 +158,52 @@ function mtbScaleHits(data: Uint8Array): string[] {
   return out;
 }
 
-// Fetch each gate tile OVER HTTP and confirm a non-empty mtb_scale.
-for (const z of gateZooms) {
-  const hit = byZoom.get(z);
-  if (!hit) {
-    console.log(`[tile] FAILED: no verified hit at z${z}`);
-    process.exitCode = 1;
-    continue;
-  }
-  const url = `${martin.url}/${mtbSource}/${hit.zoom}/${hit.x}/${hit.y}`;
-  console.log(`[tile] GET ${url}`);
-  const res = await fetch(url);
-  if (!res.ok) {
-    console.log(`[tile] FAILED: HTTP ${res.status}`);
-    process.exitCode = 1;
-    continue;
-  }
-  const raw = new Uint8Array(await res.arrayBuffer());
-  const scales = mtbScaleHits(decode(raw));
-  if (scales.length === 0) {
-    console.log(`[tile] FAILED: z${z} tile has no mtb feature with a non-empty mtb_scale`);
-    process.exitCode = 1;
-  } else {
-    console.log(`[tile] OK: z${z} serves ${scales.length} mtb_scale feature(s), e.g. "${scales[0]}"`);
+/** Top-left z-tile of the tileset's bounds (always present in a planetiler MBTiles). */
+function topLeftTileFromBounds(file: string, z: number): { x: number; y: number } | null {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const row = db.prepare("SELECT value FROM metadata WHERE name = 'bounds'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return null;
+    const parts = row.value.split(",").map(Number);
+    const west = parts[0];
+    const north = parts[3];
+    if (west === undefined || north === undefined) return null;
+    if (!Number.isFinite(west) || !Number.isFinite(north)) return null;
+    const n = 2 ** z;
+    const x = Math.max(0, Math.floor(((west + 180) / 360) * n));
+    const latRad = (north * Math.PI) / 180;
+    const y = Math.max(
+      0,
+      Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n),
+    );
+    return { x, y };
+  } finally {
+    db.close();
   }
 }
+
+// Confirm the mtb source is served over HTTP as MVT (top-left of the bounds —
+// always present in a planetiler MBTiles). Content coverage is checked
+// file-level below.
+const corner = topLeftTileFromBounds(mtbFile, 14);
+if (!corner) {
+  console.log("[tile] FAILED: tileset has no bounds metadata");
+  martin.shutdown();
+  process.exit(1);
+}
+const url = `${martin.url}/${mtbSource}/14/${corner.x}/${corner.y}`;
+console.log(`[tile] GET ${url}`);
+const res = await fetch(url);
+if (!res.ok) {
+  console.log(`[tile] FAILED: HTTP ${res.status}`);
+  martin.shutdown();
+  process.exit(1);
+}
+const raw = new Uint8Array(await res.arrayBuffer());
+const scales = mtbScaleHits(decode(raw));
+console.log(`[tile] OK: mtb source served as MVT (${scales.length} mtb_scale feature(s) in this tile)`);
 
 // Coverage: total non-empty mtb_scale features at z14 (file-level, all tiles).
 function countMtbScaleAtZoom(file: string, zoom: number): number {

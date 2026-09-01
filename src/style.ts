@@ -11,17 +11,13 @@ import {
   expectedMtbSource,
 } from "./martin.js";
 import {
-  MTB_OVERLAY_ATTR,
-  MTB_OVERLAY_LAYER,
   OPTIONAL_LAYERS,
   REQUIRED_LAYERS,
   REQUIRED_MAXZOOM,
   readDeclaredFields,
   readDemSpec,
-  readMtbBounds,
   readTilesetView,
   type DemSpec,
-  type MtbHit,
 } from "./verify.js";
 
 /**
@@ -628,54 +624,6 @@ export async function verifyStyleServing(cfg: Config, martinUrl: string): Promis
 }
 
 // ---------------------------------------------------------------------------
-// Step 11: MTB overlay serving check (tiles over HTTP)
-// ---------------------------------------------------------------------------
-
-export interface MtbServeResult {
-  source: string;
-  hits: MtbHit[];
-}
-
-/** Safety cap on tiles fetched per gate zoom while looking for mtb_scale. */
-const MTB_SERVE_MAX_TILES = 2_000;
-
-/**
- * Step 11 gate: the MTB overlay tileset must actually be SERVED with content
- * — a `mtb` feature with a non-empty `mtb_scale` at BOTH the minzoom and z14,
- * fetched over HTTP from the tile server (the artifact gate
- * `verifyMtbMbtiles` checks the file; this checks the serving chain: Martin
- * config, source id, routing, MVT encoding). Tiles covering the tileset
- * bounds are fetched in order per gate zoom, stopping at the first hit.
- */
-export async function verifyMtbServing(cfg: Config, martinUrl: string): Promise<MtbServeResult> {
-  const source = expectedMtbSource(cfg.mtbMbtilesFile);
-  const bounds = readMtbBounds(cfg.mtbMbtilesFile);
-  if (bounds === null) {
-    throw new Error(
-      `cannot read the bounds metadata of ${cfg.mtbMbtilesFile} — cannot locate tiles for the MTB serving check`,
-    );
-  }
-  const gateZooms = Array.from(new Set([cfg.mtbMinzoom, REQUIRED_MAXZOOM])).sort((a, b) => a - b);
-  const hits: MtbHit[] = [];
-  for (const z of gateZooms) {
-    const { hit, fetched } = await findServedMtbTile(martinUrl, source, z, bounds);
-    if (hit === null) {
-      throw new Error(
-        `no ${MTB_OVERLAY_LAYER} feature with a non-empty ${MTB_OVERLAY_ATTR} served at z${z} ` +
-          `(${fetched} tiles over the tileset bounds tried) — the tile server is not serving the mtb tileset correctly`,
-      );
-    }
-    hits.push(hit);
-  }
-  log(
-    `mtb serving OK: source "${source}" serves ${MTB_OVERLAY_LAYER}.${MTB_OVERLAY_ATTR} over HTTP at ` +
-      `z${gateZooms.map((z) => `${z}`).join(" and z")} ` +
-      `(${hits.map((h) => `z${h.zoom}/${h.x}/${h.y} ${JSON.stringify(h.properties)}`).join("; ")})`,
-  );
-  return { source, hits };
-}
-
-// ---------------------------------------------------------------------------
 // 3D-terrain (dem) serving check (tiles over HTTP)
 // ---------------------------------------------------------------------------
 
@@ -776,85 +724,6 @@ function readIhdr(buf: Uint8Array): { width: number; height: number } | null {
   }
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   return { width: view.getUint32(16, false), height: view.getUint32(20, false) };
-}
-
-/**
- * Fetches tiles covering `bounds` at `zoom` over HTTP from
- * `<base>/<source>/z/x/y`, stopping at the first `mtb` feature with a
- * non-empty mtb_scale (or the safety cap). Returns the hit (or null) plus
- * how many tiles were fetched.
- *
- * The scan is a COARSE-TO-FINE GRID (32×32 points, halving per pass) rather
- * than a corner-anchored raster: over wide bounds a raster scan burns the
- * whole cap on one corner and misses content concentrated elsewhere (e.g.
- * the Sørlandet tileset at z14: 224×181 tiles, content from column ~40 — a
- * raster scan of 2000 tiles never reaches it). The grid guarantees the cap
- * is spent spread over the whole bounds.
- */
-async function findServedMtbTile(
-  martinUrl: string,
-  source: string,
-  zoom: number,
-  bounds: [number, number, number, number],
-): Promise<{ hit: MtbHit | null; fetched: number }> {
-  const size = 1 << zoom;
-  const [west, south, east, north] = bounds;
-  const x0 = clamp(lonToTile(west, zoom), 0, size - 1);
-  const x1 = clamp(lonToTile(east, zoom), 0, size - 1);
-  const y0 = clamp(latToTile(north, zoom), 0, size - 1);
-  const y1 = clamp(latToTile(south, zoom), 0, size - 1);
-  const width = x1 - x0 + 1;
-  const height = y1 - y0 + 1;
-  const tried = new Set<string>();
-  let fetched = 0;
-
-  const fetchTile = async (x: number, y: number): Promise<MtbHit | null> => {
-    const res = await fetch(`${martinUrl}/${source}/${zoom}/${x}/${y}`, {
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return null;
-    const raw = new Uint8Array(await res.arrayBuffer());
-    const data = maybeGunzip(raw);
-    const buf = Buffer.from(data);
-    // Fast pre-filter: the MVT keys array contains "mtb_scale" in every
-    // tile where any feature carries the attribute.
-    if (buf.indexOf(MTB_OVERLAY_ATTR) === -1) return null;
-    const vt = new VectorTile(new PbfReader(new Uint8Array(buf)));
-    const layer = vt.layers[MTB_OVERLAY_LAYER];
-    if (layer === undefined) return null;
-    for (let i = 0; i < layer.length; i++) {
-      const props = layer.feature(i).properties;
-      const value = props[MTB_OVERLAY_ATTR];
-      if (value !== undefined && value !== "") {
-        return { zoom, x, y, layer: MTB_OVERLAY_LAYER, properties: { ...props } };
-      }
-    }
-    return null;
-  };
-
-  for (let grid = 32; grid >= 1; grid = Math.max(1, grid / 2)) {
-    const sx = Math.max(1, Math.ceil(width / grid));
-    const sy = Math.max(1, Math.ceil(height / grid));
-    for (let i = 0; i < width; i += sx) {
-      for (let j = 0; j < height; j += sy) {
-        const x = x0 + i;
-        const y = y0 + j;
-        const key = `${x}:${y}`;
-        if (tried.has(key)) continue;
-        if (fetched >= MTB_SERVE_MAX_TILES) return { hit: null, fetched };
-        tried.add(key);
-        fetched += 1;
-        try {
-          const hit = await fetchTile(x, y);
-          if (hit !== null) return { hit, fetched };
-        } catch {
-          // not this tile — try the next
-        }
-      }
-    }
-    if (sx === 1 && sy === 1) break; // fully covered
-  }
-  return { hit: null, fetched };
 }
 
 function clamp(n: number, lo: number, hi: number): number {

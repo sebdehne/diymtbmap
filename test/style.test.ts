@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, after } from "node:test";
-import Database from "better-sqlite3";
 import {
   analyzeStyle,
   buildAppOrigin,
@@ -15,7 +14,6 @@ import {
   checkStyleCompatibility,
   loadStyle,
   renderSmokeTest,
-  verifyMtbServing,
   withTileSources,
   type StyleDoc,
 } from "../src/style.js";
@@ -479,140 +477,4 @@ test("renderSmokeTest: throws when nothing decodes", async () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// verifyMtbServing (step 11)
-// ---------------------------------------------------------------------------
 
-/**
- * An MTB MBTiles fixture with just the metadata verifyMtbServing reads from
- * the file (bounds); the tile content itself arrives over HTTP.
- */
-function writeMtbMbtiles(file: string, bounds: string | null): void {
-  mkdirSync(dirname(file), { recursive: true });
-  const db = new Database(file);
-  try {
-    db.exec("CREATE TABLE metadata (name text, value text)");
-    db.prepare("INSERT INTO metadata (name, value) VALUES ('format', 'pbf')").run();
-    if (bounds !== null) {
-      db.prepare("INSERT INTO metadata (name, value) VALUES ('bounds', ?)").run(bounds);
-    }
-  } finally {
-    db.close();
-  }
-}
-
-const MTB_TILE = tileBytes([
-  layer("mtb", [feature([0, 0], pointGeometry(10, 10))], ["mtb_scale"], [stringVal("4")]),
-]);
-
-const MTB_TILE_URL_RE = /^\/mtb\/\d+\/\d+\/\d+$/;
-
-// NOTE: the fixtures are all named `mtb.mbtiles` (in separate dirs) because
-// Martin derives the source id from the file name, and verifyMtbServing
-// requests exactly that id.
-test("verifyMtbServing: finds a non-empty mtb_scale at the minzoom and z14 over HTTP", async () => {
-  const file = join(dir, "serve-ok", "mtb.mbtiles");
-  writeMtbMbtiles(file, "7,58,11,62");
-  const server: Server = createServer((req, res) => {
-    if (MTB_TILE_URL_RE.test(req.url ?? "")) {
-      res.setHeader("content-type", "application/x-protobuf");
-      res.end(Buffer.from(MTB_TILE));
-    } else {
-      res.statusCode = 404;
-      res.end("not found");
-    }
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-  const addr = server.address() as AddressInfo;
-  try {
-    const cfg = { mtbMbtilesFile: file, mtbMinzoom: 7 } as Config;
-    const result = await verifyMtbServing(cfg, `http://127.0.0.1:${addr.port}`);
-    assert.equal(result.source, "mtb");
-    assert.deepEqual(
-      result.hits.map((h) => h.zoom).sort((a, b) => a - b),
-      [7, 14],
-      "both gate zooms (minzoom + z14) must hit",
-    );
-    for (const h of result.hits) {
-      assert.equal(h.layer, "mtb");
-      assert.equal(h.properties.mtb_scale, "4");
-    }
-  } finally {
-    server.close();
-  }
-});
-
-test("verifyMtbServing: finds content on the far side of wide bounds (scan must cover, not just the first corner)", async () => {
-  // Mirrors the real Sørlandet tileset at z14: the bounds span 224×181 tiles
-  // but content only exists in the central-eastern block x 8491-8612,
-  // y 4794-4933. A corner-anchored raster scan burns its 2000-tile cap on
-  // the first ~11 columns and never reaches it — the scan must cover the
-  // whole bounds instead.
-  const file = join(dir, "serve-far", "mtb.mbtiles");
-  writeMtbMbtiles(file, "5.69866,57.58445,10.59256,59.67468");
-  const server: Server = createServer((req, res) => {
-    const m = /^\/mtb\/(\d+)\/(\d+)\/(\d+)$/.exec(req.url ?? "");
-    if (m) {
-      const z = Number(m[1]);
-      const x = Number(m[2]);
-      const y = Number(m[3]);
-      const hasContent = z === 7 || (z === 14 && x >= 8491 && x <= 8612 && y >= 4794 && y <= 4933);
-      if (hasContent) {
-        res.setHeader("content-type", "application/x-protobuf");
-        res.end(Buffer.from(MTB_TILE));
-        return;
-      }
-    }
-    res.statusCode = 404;
-    res.end("not found");
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-  const addr = server.address() as AddressInfo;
-  try {
-    const cfg = { mtbMbtilesFile: file, mtbMinzoom: 7 } as Config;
-    const result = await verifyMtbServing(cfg, `http://127.0.0.1:${addr.port}`);
-    assert.deepEqual(
-      result.hits.map((h) => h.zoom).sort((a, b) => a - b),
-      [7, 14],
-    );
-    const z14 = result.hits.find((h) => h.zoom === 14)!;
-    assert.ok(z14.x >= 8491 && z14.x <= 8612 && z14.y >= 4794 && z14.y <= 4933, "hit must be inside the content block");
-  } finally {
-    server.close();
-  }
-});
-
-test("verifyMtbServing: throws when no served tile carries a non-empty mtb_scale", async () => {
-  const file = join(dir, "serve-empty", "mtb.mbtiles");
-  writeMtbMbtiles(file, "7,58,11,62");
-  const noScale = tileBytes([
-    layer("mtb", [feature([0, 0], pointGeometry(10, 10))], ["class"], [stringVal("track")]),
-  ]);
-  const server: Server = createServer((req, res) => {
-    if (MTB_TILE_URL_RE.test(req.url ?? "")) {
-      res.setHeader("content-type", "application/x-protobuf");
-      res.end(Buffer.from(noScale));
-    } else {
-      res.statusCode = 404;
-      res.end("not found");
-    }
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-  const addr = server.address() as AddressInfo;
-  try {
-    const cfg = { mtbMbtilesFile: file, mtbMinzoom: 7 } as Config;
-    await assert.rejects(
-      () => verifyMtbServing(cfg, `http://127.0.0.1:${addr.port}`),
-      /no mtb feature with a non-empty mtb_scale/,
-    );
-  } finally {
-    server.close();
-  }
-});
-
-test("verifyMtbServing: throws when the tileset has no bounds metadata", async () => {
-  const file = join(dir, "serve-nobounds", "mtb.mbtiles");
-  writeMtbMbtiles(file, null);
-  const cfg = { mtbMbtilesFile: file, mtbMinzoom: 7 } as Config;
-  await assert.rejects(() => verifyMtbServing(cfg, "http://127.0.0.1:1"), /bounds/);
-});

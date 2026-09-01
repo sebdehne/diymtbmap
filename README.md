@@ -25,6 +25,10 @@ builds [OpenMapTiles](https://openmaptiles.org/) vector tiles with
   and tiles) goes through the app; the tile server stays internal.
 - **No database.** The persisted artifact is an MBTiles file in a volume;
   re-runs skip the download + build unless `FORCE_REIMPORT=1`.
+- **On-demand re-import** — the info panel's **Update data** button re-downloads
+  and rebuilds only the OSM vector tilesets when a newer Geofabrik release
+  exists, while the current map keeps serving. The elevation tileset is never
+  touched, and the app allows at most one attempt per local day.
 - **Sub-path friendly** — can be mounted under a reverse-proxy path (e.g. `/mtb/`)
   without touching other paths on the host.
 - **Single layers panel** (top-right) — one round layers icon expands into all
@@ -104,10 +108,14 @@ checking → downloading → building → starting → ready
 
 1. **checking** — verifies the toolchain (Java + both profile jars) and whether
    `openmaptiles.mbtiles` already exists.
-2. **downloading** — streams the ~1.3 GB Norway PBF from Geofabrik (tracked by bytes).
+2. **downloading** — reuses a present extract when available (a downloaded one at
+   `OSM_DOWNLOAD_FILE` wins over a mounted seed at `OSM_FILE`); only when neither
+   exists does it resolve the newest dated Norway `.osm.pbf` from the
+   `OSM_LISTING_URL` listing page and stream it (tracked by bytes) into
+   `OSM_DOWNLOAD_FILE`.
 3. **building** — runs Planetiler twice: once for the 16-layer basemap
    (`openmaptiles.mbtiles`), once for the MTB overlay (`mtb.mbtiles`), then
-   verifies both artifacts (layer coverage + a real `mtb_scale` feature present).
+    verifies both artifacts (layer coverage + a declared `mtb_scale` field).
 4. **starting** — starts Martin (loopback) and confirms it serves both expected
    sources with the right layers; runs a render smoke test against real tiles.
 5. **ready** — the progress card is replaced by the map.
@@ -122,8 +130,32 @@ takes a few seconds** (the download + build stage is skipped).
   if the artifacts exist (clears them first).
 - **`SKIP_PIPELINE=1`** — serve the UI + `/api/status` only; do not run the pipeline
   (for local development against pre-built data).
-- To update to a newer OSM extract, set `FORCE_REIMPORT=1` and restart, or delete
-  the artifacts from the `/data` volume and restart.
+- **On-demand re-import** — use the map's **Update data** button (info panel), or
+  call the API directly:
+
+  ```sh
+  curl -X POST http://localhost:8080/api/reimport
+  curl http://localhost:8080/api/reimport
+  ```
+
+   The button/API checks the `OSM_LISTING_URL` listing for a strictly newer dated
+   `.osm.pbf`, then builds fresh vector tilesets in staging and swaps them in only
+   after verification. The current map keeps serving during the build.
+- **Use a kickoff extract to avoid repeated downloads** — point `OSM_FILE` at a PBF
+   you already have (bind-mount it read-only is fine, e.g.
+   `-v /path/to/norway.osm.pbf:/data/norway-latest.osm.pbf`). On a normal boot the
+   app builds from that seed instead of downloading ~1.3 GB. A downloaded extract
+   (`OSM_DOWNLOAD_FILE`, higher priority) always wins when present, and the seed is
+   never deleted or overwritten — so restarts stay cheap and a forced re-import
+   still downloads fresh into `OSM_DOWNLOAD_FILE`.
+- **Reset the daily attempt** — the app records one re-import attempt per local
+  day in `REIMPORT_STATE_FILE` (default `/data/last-reimport.json`). Delete that
+  file if you want to try again the same day (for example after a transient
+  failure):
+
+  ```sh
+  rm /data/last-reimport.json
+  ```
 
 ### Configuration
 
@@ -135,8 +167,9 @@ full list.
 | `PORT` | `8080` | The app's (only published) port. |
 | `BASE_PATH` | `""` (root) | Sub-path to mount under (e.g. `/mtb`). No trailing slash. |
 | `DATA_DIR` | `/data` | Where PBF + MBTiles + Planetiler cache live. |
-| `OSM_URL` | Norway Geofabrik PBF | Source extract to download. |
-| `OSM_FILE` | `/data/norway-latest.osm.pbf` | Local path for the extract. |
+| `OSM_LISTING_URL` | Norway Geofabrik listing page | Provider page parsed to find the newest dated `.osm.pbf` release to download. |
+| `OSM_FILE` | `/data/norway-latest.osm.pbf` | Optional **seed/kickoff** extract (bind-mount read-only OK). Fallback only — never deleted or overwritten. |
+| `OSM_DOWNLOAD_FILE` | `/data/osm-download.osm.pbf` | Writable destination for a fresh extract. Higher priority than `OSM_FILE`; used by `FORCE_REIMPORT` and re-imports. |
 | `MBTILES_FILE` | `/data/openmaptiles.mbtiles` | Basemap tileset artifact. |
 | `MTB_MINZOOM` | `3` | MTB overlay start zoom (build arg, baked in). |
 | `MTB_MBTILES_FILE` | `/data/mtb.mbtiles` | MTB overlay tileset artifact. |
@@ -153,7 +186,7 @@ full list.
 | `TILE_SOURCE_URL` | *(empty)* | Full tile-source URL override for the style (escape hatch for proxies). |
 | `FORCE_REIMPORT` | `0` | `1` = force a fresh download + rebuild. |
 | `SKIP_PIPELINE` | `0` | `1` = serve UI + status only. |
-| `VERIFY_MTB_MAX_TILES` | `4000000` | Safety cap for the `mtb_scale` verification scan. |
+| `REIMPORT_STATE_FILE` | `/data/last-reimport.json` | Persisted on-demand re-import state; delete it to reset the once-per-day attempt. |
 
 Example — serve under a sub-path and force a rebuild:
 

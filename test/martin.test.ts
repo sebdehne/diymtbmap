@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import net from "node:net";
+import Database from "better-sqlite3";
 import type { Config } from "../src/config.js";
 import {
   EXPECTED_SOURCE,
@@ -138,4 +143,120 @@ test("MartinServer: maps wildcard binds to 127.0.0.1 for its own HTTP calls", ()
   assert.equal(mk("::").url, "http://127.0.0.1:3000");
   assert.equal(mk("::1").url, "http://127.0.0.1:3000");
   assert.equal(mk("192.168.1.5").url, "http://192.168.1.5:3000");
+});
+
+const STUB_SCRIPT = [
+  '#!/usr/bin/env node',
+  'const http = require("node:http");',
+  'const fs = require("node:fs");',
+  'const args = process.argv.slice(2);',
+  'const listenArg = args[args.indexOf("--listen-addresses") + 1];',
+  'const [host, port] = listenArg.split(":");',
+  'const logFile = process.env.MARTIN_STUB_START_LOG;',
+  'if (logFile) fs.appendFileSync(logFile, process.pid + "\\n");',
+  'const server = http.createServer((req, res) => {',
+  '  if (req.url === "/health") { res.writeHead(200, {"content-type":"text/plain"}); res.end("ok"); return; }',
+  '  if (req.url === "/catalog") {',
+  '    res.writeHead(200, {"content-type":"application/json"});',
+  '    res.end(JSON.stringify({ tiles: { openmaptiles: { content_type: "application/x-protobuf" }, mtb: { content_type: "application/x-protobuf" } } }));',
+  '    return;',
+  '  }',
+  '  res.writeHead(404); res.end();',
+  '});',
+  'server.listen(Number(port), host);',
+  'process.on("SIGTERM", () => process.exit(0));',
+].join("\n");
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (addr === null || typeof addr === "string") {
+        srv.close();
+        reject(new Error("could not determine a free port"));
+        return;
+      }
+      const port = addr.port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+function makeBasemap(file: string): void {
+  const db = new Database(file);
+  db.exec("CREATE TABLE metadata (name text, value text, PRIMARY KEY (name));");
+  const meta = db.prepare("INSERT INTO metadata (name, value) VALUES (?, ?)");
+  meta.run("name", "Synthetic Test");
+  meta.run("format", "pbf");
+  meta.run("minzoom", "0");
+  meta.run("maxzoom", "14");
+  meta.run(
+    "json",
+    JSON.stringify({
+      name: "Synthetic Test",
+      vector_layers: EXPECTED_LAYERS.map((id) => ({ id, name: id, fields: {} })),
+    }),
+  );
+  db.close();
+}
+
+function countLines(file: string): number {
+  return readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean).length;
+}
+
+test("MartinServer.restart: restarts and still serves (no double start)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "martin-restart-"));
+  const oldPath = process.env.PATH;
+  const oldLogEnv = process.env.MARTIN_STUB_START_LOG;
+  try {
+    const binDir = join(root, "bin");
+    const dataDir = join(root, "data");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
+
+    const bin = join(binDir, "martin");
+    writeFileSync(bin, STUB_SCRIPT);
+    chmodSync(bin, 0o755);
+    process.env.PATH = oldPath ? `${binDir}:${oldPath}` : binDir;
+    const startsLog = join(root, "starts.log");
+    process.env.MARTIN_STUB_START_LOG = startsLog;
+
+    const basemap = join(dataDir, "openmaptiles.mbtiles");
+    const mtb = join(dataDir, "mtb.mbtiles");
+    const dem = join(dataDir, "dem.mbtiles");
+    makeBasemap(basemap);
+    writeFileSync(mtb, "");
+    const yaml = join(dataDir, "martin.yaml");
+    writeFileSync(yaml, `mbtiles:\n  - ${basemap}\n  - ${mtb}\n`);
+
+    const cfg = {
+      martinBind: "127.0.0.1",
+      martinPort: await freePort(),
+      martinConfig: yaml,
+      mbtilesFile: basemap,
+      mtbMbtilesFile: mtb,
+      demMbtilesFile: dem,
+    } as Config;
+
+    const server = new MartinServer(cfg);
+    await server.start();
+    assert.equal(countLines(startsLog), 1);
+    assert.deepEqual(server.sources, ["mtb", "openmaptiles"]);
+
+    await server.restart();
+    assert.equal(countLines(startsLog), 2);
+    const res = await fetch(`${server.url}/health`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(server.sources, ["mtb", "openmaptiles"]);
+
+    server.shutdown();
+  } finally {
+    process.env.PATH = oldPath;
+    process.env.MARTIN_STUB_START_LOG = oldLogEnv;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

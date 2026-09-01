@@ -11,8 +11,32 @@ export interface Config {
    * the historical branding; set COUNTRY_NAME to rebrand for another extract.
    */
   countryName: string;
-  osmUrl: string;
+  /**
+   * Geofabrik listing page parsed for the newest dated `.osm.pbf` release.
+   * The boot pipeline and the on-demand re-import both resolve the concrete
+   * download URL from this page.
+   */
+  osmListingUrl: string;
+  /**
+   * OSM extract SEED (optional): a PBF you provide or bind-mount (read-only is
+   * fine) as a "kickoff" extract so the app doesn't have to download one — e.g.
+   * to avoid repeated ~1.3 GB downloads during testing. It is a FALLBACK only:
+   * when a downloaded extract (`osmDownloadFile`) is present, that one wins.
+   * The app never deletes or overwrites this file.
+   */
   osmFile: string;
+  /**
+   * OSM extract DOWNLOAD destination: where a fresh extract is fetched (normal
+   * boot with no seed, `FORCE_REIMPORT`, or an on-demand re-import). Higher
+   * priority than the seed (`osmFile`) — when present the app builds from it.
+   * Must be writable (it lives in the data volume, never on a read-only mount).
+   */
+  osmDownloadFile: string;
+  /**
+   * Persisted re-import attempt state (date + outcome). Deleting this file is
+   * the supported way to allow another attempt on the same day.
+   */
+  reimportStateFile: string;
   mbtilesFile: string;
   planetilerJar: string;
   planetilerHeapMb: number;
@@ -42,7 +66,6 @@ export interface Config {
   martinConfig: string;
   forceReimport: boolean;
   skipPipeline: boolean;
-  verifyMtbMaxTiles: number;
   /**
    * Optional full URL for the tile source the style points at (wins over the
    * request-host-aware default). For reverse proxies / Martin port remaps.
@@ -97,6 +120,18 @@ function envBasePath(): string {
   return p;
 }
 
+/**
+ * Staging destination for an artifact being rebuilt in place during an
+ * on-demand re-import: `openmaptiles.mbtiles` ->
+ * `openmaptiles.staging.mbtiles`. The staging file is verified, then renamed
+ * over the live artifact.
+ */
+export function stagingPath(file: string): string {
+  return file.endsWith(".mbtiles")
+    ? `${file.slice(0, -".mbtiles".length)}.staging.mbtiles`
+    : `${file}.staging`;
+}
+
 export function loadConfig(): Config {
   // dist/config.js -> <app>/dist -> <app>; src/config.ts (dev) -> <app>/src -> <app>
   const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -107,10 +142,14 @@ export function loadConfig(): Config {
     publicDir: path.join(appRoot, "public"),
     dataDir,
     countryName: process.env.COUNTRY_NAME ?? "Norway",
-    osmUrl:
-      process.env.OSM_URL ??
-      "https://download.geofabrik.de/europe/norway-latest.osm.pbf",
+    osmListingUrl:
+      process.env.OSM_LISTING_URL ??
+      "https://download.geofabrik.de/europe/norway.html",
     osmFile: process.env.OSM_FILE ?? path.join(dataDir, "norway-latest.osm.pbf"),
+    osmDownloadFile:
+      process.env.OSM_DOWNLOAD_FILE ?? path.join(dataDir, "osm-download.osm.pbf"),
+    reimportStateFile:
+      process.env.REIMPORT_STATE_FILE ?? path.join(dataDir, "last-reimport.json"),
     mbtilesFile:
       process.env.MBTILES_FILE ?? path.join(dataDir, "openmaptiles.mbtiles"),
     // Self-contained openmaptiles/planetiler-openmaptiles profile jar
@@ -159,7 +198,5 @@ export function loadConfig(): Config {
     basePath: envBasePath(),
     forceReimport: envBool("FORCE_REIMPORT", false),
     skipPipeline: envBool("SKIP_PIPELINE", false),
-    // Safety cap for the mtb_scale tile scan in the artifact verification.
-    verifyMtbMaxTiles: envInt("VERIFY_MTB_MAX_TILES", 4_000_000),
   };
 }

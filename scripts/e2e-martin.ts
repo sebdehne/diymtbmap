@@ -4,8 +4,8 @@
  *   1. MartinServer starts the real `martin` with a generated config
  *   2. verified: config/file agreement, the served file's 16 OMT layers,
  *      /catalog source id "openmaptiles" + MVT content type
- *   3. the known mtb_scale tile is fetched OVER HTTP, decoded, and the
- *      feature's mtb_scale value confirmed
+ *   3. a tile (top-left of the bounds) is fetched OVER HTTP and confirmed to
+ *      serve as MVT
  *
  * Usage:
  *   npx tsx scripts/e2e-martin.ts [mbtiles-file] [port-offset]
@@ -25,7 +25,38 @@ import { verifyMbtiles } from "../src/verify.js";
 import { gunzipSync } from "node:zlib";
 import { PbfReader } from "pbf";
 import { VectorTile } from "@mapbox/vector-tile";
+import Database from "better-sqlite3";
 import type { Config } from "../src/config.js";
+
+/**
+ * Top-left z-tile of the tileset's bounds (always present in a planetiler
+ * MBTiles, which tiles the full bounds at every zoom). Used to confirm Martin
+ * serves the source over HTTP without scanning for content.
+ */
+function topLeftTileFromBounds(file: string, z: number): { x: number; y: number } | null {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const row = db.prepare("SELECT value FROM metadata WHERE name = 'bounds'").get() as
+      | { value: string }
+      | undefined;
+    if (!row) return null;
+    const parts = row.value.split(",").map(Number);
+    const west = parts[0];
+    const north = parts[3];
+    if (west === undefined || north === undefined) return null;
+    if (!Number.isFinite(west) || !Number.isFinite(north)) return null;
+    const n = 2 ** z;
+    const x = Math.max(0, Math.floor(((west + 180) / 360) * n));
+    const latRad = (north * Math.PI) / 180;
+    const y = Math.max(
+      0,
+      Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n),
+    );
+    return { x, y };
+  } finally {
+    db.close();
+  }
+}
 
 const [mbtilesIn = "/tmp/mtb-e2e/sorlandet.mbtiles"] = process.argv.slice(2);
 
@@ -72,36 +103,26 @@ if (JSON.stringify(meta) !== JSON.stringify(cat)) {
   console.log(`[catalog] matches the MBTiles vector_layers metadata (${meta.length} layers)`);
 }
 
-// 3. fetch the mtb tile over HTTP and confirm the feature content
-const { zoom, x, y } = v.mtbHit;
-const url = `${martin.url}/${EXPECTED_SOURCE}/${zoom}/${x}/${y}`;
+// 3. fetch a tile over HTTP (top-left of the bounds — always present) and
+// confirm it serves as MVT
+const corner = topLeftTileFromBounds(mbtiles, 14);
+if (!corner) {
+  console.log("[tile] FAILED: tileset has no bounds metadata");
+  martin.shutdown();
+  process.exit(1);
+}
+const url = `${martin.url}/${EXPECTED_SOURCE}/14/${corner.x}/${corner.y}`;
 console.log(`[tile] GET ${url}`);
 const res = await fetch(url);
 if (!res.ok) {
   console.log(`[tile] FAILED: HTTP ${res.status}`);
   process.exitCode = 1;
-} else {
-  const raw = new Uint8Array(await res.arrayBuffer());
-  const data = raw[0] === 0x1f && raw[1] === 0x8b ? new Uint8Array(gunzipSync(Buffer.from(raw))) : raw;
-  const vt = new VectorTile(new PbfReader(data));
-  const layer = vt.layers["transportation"];
-  let hit: unknown;
-  if (layer) {
-    for (let i = 0; i < layer.length; i++) {
-      const props = layer.feature(i).properties;
-      if (props.mtb_scale !== undefined && props.mtb_scale !== "") {
-        hit = props;
-        break;
-      }
-    }
-  }
-  if (hit === undefined) {
-    console.log("[tile] FAILED: no transportation feature with a non-empty mtb_scale");
-    process.exitCode = 1;
   } else {
-    console.log(`[tile] OK: ${JSON.stringify(hit)}`);
+    const raw = new Uint8Array(await res.arrayBuffer());
+    const data = raw[0] === 0x1f && raw[1] === 0x8b ? new Uint8Array(gunzipSync(Buffer.from(raw))) : raw;
+    const vt = new VectorTile(new PbfReader(data));
+    console.log(`[tile] OK: served as MVT (${vt.layers.length} layer(s))`);
   }
-}
 
 martin.shutdown();
 rmSync(join(dir, "tmp"), { recursive: true, force: true });

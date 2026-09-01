@@ -111,6 +111,7 @@ ARG FONT_SHA256=1a5d6323621d556ec120eaf95398d5093abb9f5181a17c9b8867e214b3f4312b
 
 ENV DEBIAN_FRONTEND=noninteractive \
     OSM_FILE=/data/norway-latest.osm.pbf \
+    OSM_DOWNLOAD_FILE=/data/osm-download.osm.pbf \
     DATA_DIR=/data \
     PLANETILER_JAR=/opt/planetiler/planetiler-openmaptiles.jar \
     MTB_MINZOOM="${MTB_MINZOOM}" \

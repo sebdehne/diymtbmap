@@ -143,6 +143,7 @@ export class MartinServer {
   private cfg: Config;
   private proc: ChildProcess | null = null;
   private shuttingDown = false;
+  private startPromise: Promise<void> | null = null;
 
   constructor(cfg: Config) {
     this.cfg = cfg;
@@ -175,6 +176,14 @@ export class MartinServer {
 
   /** Blocks until Martin is answering (retries indefinitely). */
   async start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.doStart().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  private async doStart(): Promise<void> {
     this.verifyConfig();
     for (;;) {
       const proc = this.spawnProc();
@@ -192,6 +201,40 @@ export class MartinServer {
       log("martin did not become ready — retrying in 5s");
       await sleep(RESTART_DELAY_MS);
     }
+  }
+
+  /**
+   * Stop the current Martin and start a fresh one (used after an on-demand
+   * re-import has swapped the MBTiles files). The watchdog is suppressed for
+   * the intentional stop so it does not race the fresh start.
+   */
+  async restart(): Promise<void> {
+    if (this.startPromise) await this.startPromise;
+    const proc = this.proc;
+    if (proc !== null) {
+      this.shuttingDown = true;
+      const exited = this.waitForExit(proc, 10_000);
+      proc.kill("SIGTERM");
+      await exited;
+      this.proc = null;
+      this.shuttingDown = false;
+    }
+    log("restarting martin");
+    await this.start();
+  }
+
+  private waitForExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
+    if (proc.exitCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (proc.exitCode === null && !proc.killed) proc.kill("SIGKILL");
+      }, timeoutMs);
+      timer.unref();
+      proc.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   /**

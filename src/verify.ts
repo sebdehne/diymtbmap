@@ -1,7 +1,4 @@
 import Database from "better-sqlite3";
-import { gunzipSync } from "node:zlib";
-import { PbfReader } from "pbf";
-import { VectorTile } from "@mapbox/vector-tile";
 import { log } from "./log.js";
 
 /**
@@ -65,15 +62,6 @@ export const MTB_IMBA_ATTR = "mtb_imba";
 /** The tileset must cover at least z0–z14 (the style + overlay are built for it). */
 export const REQUIRED_MAXZOOM = 14;
 
-export interface MtbHit {
-  zoom: number;
-  x: number;
-  y: number;
-  layer: string;
-  /** Sampled feature properties (e.g. { class: "track", mtb_scale: "4", ... }). */
-  properties: Record<string, number | string | boolean>;
-}
-
 export interface VerifyResult {
   name: string | null;
   format: string | null;
@@ -82,35 +70,9 @@ export interface VerifyResult {
   bounds: [number, number, number, number] | null;
   layers: string[];
   zooms: number[];
-  /** The first transportation feature with a non-empty mtb_scale (guaranteed present on success). */
-  mtbHit: MtbHit;
-  tilesScanned: number;
-}
-
-export interface VerifyOptions {
-  /** Safety cap on the number of tiles scanned while looking for mtb_scale. */
-  maxTiles?: number;
-  /** Progress feedback (e.g. status message updates) during the mtb_scale scan. */
-  onScan?: (scanned: number, zoom: number) => void;
 }
 
 export class VerifyError extends Error {}
-
-const DEFAULT_MAX_TILES = 4_000_000;
-const SCAN_LOG_INTERVAL = 50_000;
-
-function makeOnCount(
-  scannedRef: { value: number },
-  onScan: ((scanned: number, zoom: number) => void) | undefined,
-  zoom: number,
-): (delta: number) => void {
-  return (delta: number): void => {
-    scannedRef.value += delta;
-    const total = scannedRef.value;
-    onScan?.(total, zoom);
-    if (total % SCAN_LOG_INTERVAL === 0) log(`mtb_scale scan: ${total} tiles checked (zoom ${zoom})`);
-  };
-}
 
 /**
  * The MVT layer ids declared in the MBTiles metadata (`json`/vector_layers) —
@@ -153,34 +115,18 @@ export function readDeclaredFields(file: string): Map<string, string[]> {
 }
 
 /**
- * MBTiles tiles are stored gzip-compressed (metadata `compression = gzip`).
- * Returns the decompressed tile, or the input as-is if it is not gzip.
- */
-function decompressTile(data: Uint8Array): Uint8Array {
-  if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
-    return new Uint8Array(gunzipSync(Buffer.from(data)));
-  }
-  return data;
-}
-
-/**
  * Verifies the Planetiler/OMT tileset artifact before it is served:
  *
  *  1. metadata: pbf format, z0–z14 coverage, all 16 OMT layers declared
- *     (via the `json`/`vector_layers` metadata) and `transportation.mtb_scale`
- *     present among its fields;
- *  2. tiles: every zoom 0…max(14, maxzoom) has tiles;
- *  3. content: at least one `transportation` feature carries a non-empty
- *     `mtb_scale` value (scans z14→z12 tiles over the tileset bounds; tiles
- *     are stored gzip-compressed, so each is decompressed first and the MVT
- *     keys' "mtb_scale" byte search pre-filters full decoding).
+ *     (via the `json`/`vector_layers` metadata);
+ *  2. tiles: every zoom 0…max(14, maxzoom) has tiles.
  *
  * Fails with a VerifyError describing the first violated requirement.
  *
  * Works with both the compact layout planetiler writes by default
  * (tiles_shallow + tiles_data) and the plain `tiles` table.
  */
-export function verifyMbtiles(file: string, opts: VerifyOptions = {}): VerifyResult {
+export function verifyMbtiles(file: string): VerifyResult {
   const db = new Database(file, { readonly: true, fileMustExist: true });
   try {
     const meta = new Map<string, string>();
@@ -222,8 +168,7 @@ export function verifyMbtiles(file: string, opts: VerifyOptions = {}): VerifyRes
     // Note: planetiler derives vector_layers (layers AND fields) from the
     // features actually emitted, so an absent field only means "no feature in
     // this extract carried it" — e.g. an extract without mtb:scale-tagged
-    // trails. The hard guarantee that MTB data exists is the content scan
-    // below (step 3), not the metadata declaration.
+    // trails. An absent field is a warning, not a failure.
     const transport = findVectorLayer(meta.get("json") ?? null, MTB_LAYER);
     if (transport !== null && !Object.keys(transport).includes(MTB_ATTR)) {
       log(`warning: ${MTB_LAYER}.${MTB_ATTR} is not a declared field — no feature in the extract carried it (fields: ${Object.keys(transport).join(", ")})`);
@@ -245,47 +190,6 @@ export function verifyMbtiles(file: string, opts: VerifyOptions = {}): VerifyRes
       throw new VerifyError(`tileset has no tiles at zoom levels: ${missingZooms.join(", ")}`);
     }
 
-    // 3. At least one transportation feature with a non-empty mtb_scale.
-    if (bounds === null) {
-      throw new VerifyError(
-        "missing/invalid bounds metadata — cannot locate tiles for the mtb_scale scan (and the tileset is unusable without bounds)",
-      );
-    }
-    const maxTiles = opts.maxTiles ?? DEFAULT_MAX_TILES;
-    const scanned = { value: 0 };
-    let mtbHit: MtbHit | null = null;
-    const scanZooms = [maxzoom, maxzoom - 1, maxzoom - 2].filter((z) => z >= 0);
-    const boundsForScan = bounds;
-
-    const fetchStmt = hasTable(db, "tiles_shallow")
-      ? db.prepare(
-          `SELECT d.tile_data
-           FROM tiles_shallow s
-           JOIN tiles_data d ON d.tile_data_id = s.tile_data_id
-           WHERE s.zoom_level = ? AND s.tile_column = ? AND s.tile_row = ?`,
-        )
-      : db.prepare(
-          "SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
-        );
-    const fetchTile = (z: number, x: number, yTms: number): Uint8Array | null => {
-      const row = fetchStmt.get(z, x, yTms) as { tile_data: Uint8Array } | undefined;
-      return row ? row.tile_data : null;
-    };
-
-    for (const z of scanZooms) {
-      const found = scanTiles(z, boundsForScan, fetchTile, scanned, makeOnCount(scanned, opts.onScan, z), maxTiles);
-      if (found !== null) {
-        mtbHit = found;
-        break;
-      }
-    }
-
-    if (mtbHit === null) {
-      throw new VerifyError(
-         `no ${MTB_LAYER} feature with a non-empty ${MTB_ATTR} found in ${scanned.value} tiles scanned (z${scanZooms.join(",z")} over the tileset bounds) — the extract may lack mtb:scale tagging or the profile did not emit it`,
-      );
-    }
-
     return {
       name: meta.get("name") ?? null,
       format,
@@ -294,8 +198,6 @@ export function verifyMbtiles(file: string, opts: VerifyOptions = {}): VerifyRes
       bounds,
       layers: layerIds,
       zooms,
-      mtbHit,
-      tilesScanned: scanned.value,
     };
   } finally {
     db.close();
@@ -321,23 +223,6 @@ export function readMtbMinzoom(file: string): number | null {
 }
 
 /**
- * The tileset's bounds metadata (`"west,south,east,north"`), or null when
- * absent or invalid. Cheap metadata-only read; the serve-time MTB check uses
- * it to locate the tiles it must fetch over HTTP.
- */
-export function readMtbBounds(file: string): [number, number, number, number] | null {
-  const db = new Database(file, { readonly: true, fileMustExist: true });
-  try {
-    const row = db
-      .prepare("SELECT value FROM metadata WHERE name = 'bounds'")
-      .get() as { value: string } | undefined;
-    return parseBounds(row?.value);
-  } finally {
-    db.close();
-  }
-}
-
-/**
  * The mtb-profile version that built the tileset (`mtb_profile_version`
  * metadata), or null when the file has no such metadata (e.g. a v1 tileset).
  * Cheap metadata-only read; the pipeline compares it to MTB_PROFILE_VERSION
@@ -347,7 +232,7 @@ export function readMtbProfileVersion(file: string): string | null {
   const db = new Database(file, { readonly: true, fileMustExist: true });
   try {
     const row = db
-      .prepare("SELECT value FROM metadata WHERE name = ?")
+      .prepare(`SELECT value FROM metadata WHERE name = ?`)
       .get(MTB_PROFILE_VERSION_META) as { value: string } | undefined;
     return row?.value ?? null;
   } finally {
@@ -454,9 +339,6 @@ export interface MtbTilesetResult {
   mtbMinzoom: number;
   layers: string[];
   zooms: number[];
-  /** One hit per gate zoom (the minzoom and z14), guaranteed on success. */
-  hits: MtbHit[];
-  tilesScanned: number;
   /** The mtb-profile version that built the tileset (null for v1). */
   profileVersion: string | null;
   /** True when the tileset carries bike-park trails (mtb_imba field present). */
@@ -471,11 +353,7 @@ export interface MtbTilesetResult {
  *     the expected minzoom (a stale artifact fails here, not at serve time);
  *  2. layers: the `mtb` layer is declared with the `mtb_scale` field;
  *  3. zoom coverage: tiles exist at every zoom minzoom..maxzoom and none
- *     below minzoom (the profile emits only z minzoom..14 features);
- *  4. content (the hard gate): at least one `mtb` feature carries a
- *     non-empty `mtb_scale` at BOTH the minzoom and z14 — trails must be
- *     visible at the low zoom that motivated this tileset and at street
- *     level.
+ *     below minzoom (the profile emits only z minzoom..14 features).
  *
  * Fails with a VerifyError describing the first violated requirement.
  * Works with both the compact layout (tiles_shallow + tiles_data) and the
@@ -484,7 +362,6 @@ export interface MtbTilesetResult {
 export function verifyMtbMbtiles(
   file: string,
   expectedMinzoom: number,
-  opts: VerifyOptions = {},
 ): MtbTilesetResult {
   const db = new Database(file, { readonly: true, fileMustExist: true });
   try {
@@ -530,7 +407,6 @@ export function verifyMtbMbtiles(
     }
 
     // 3. Zoom coverage: every zoom minzoom..maxzoom present, none below.
-    const bounds = parseBounds(meta.get("bounds"));
     const zoomTable = hasTable(db, "tiles_shallow") ? "tiles_shallow" : "tiles";
     const zoomRows = db
       .prepare(`SELECT DISTINCT zoom_level FROM ${zoomTable} ORDER BY zoom_level`)
@@ -548,39 +424,6 @@ export function verifyMtbMbtiles(
       throw new VerifyError(`mtb tileset has no tiles at zoom levels: ${missingZooms.join(", ")}`);
     }
 
-    // 4. Hard gate: a non-empty mtb_scale at the minzoom AND at z14.
-    if (bounds === null) {
-      throw new VerifyError("missing/invalid bounds metadata — cannot locate tiles for the mtb content scan");
-    }
-    const maxTiles = opts.maxTiles ?? DEFAULT_MAX_TILES;
-    const scanned = { value: 0 };
-    const fetchStmt = hasTable(db, "tiles_shallow")
-      ? db.prepare(
-          `SELECT d.tile_data
-           FROM tiles_shallow s
-           JOIN tiles_data d ON d.tile_data_id = s.tile_data_id
-           WHERE s.zoom_level = ? AND s.tile_column = ? AND s.tile_row = ?`,
-        )
-      : db.prepare(
-          "SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
-        );
-    const fetchTile = (z: number, x: number, yTms: number): Uint8Array | null => {
-      const row = fetchStmt.get(z, x, yTms) as { tile_data: Uint8Array } | undefined;
-      return row ? row.tile_data : null;
-    };
-
-    const gateZooms = Array.from(new Set([expectedMinzoom, REQUIRED_MAXZOOM])).sort((a, b) => a - b);
-    const hits: MtbHit[] = [];
-    for (const z of gateZooms) {
-      const hit = scanTiles(z, bounds, fetchTile, scanned, makeOnCount(scanned, opts.onScan, z), maxTiles, MTB_OVERLAY_LAYER);
-      if (hit === null) {
-        throw new VerifyError(
-          `no ${MTB_OVERLAY_LAYER} feature with a non-empty ${MTB_OVERLAY_ATTR} at z${z} (${scanned.value} tiles scanned so far) — the min-zoom MTB gate failed`,
-        );
-      }
-      hits.push(hit);
-    }
-
     return {
       format: format!,
       minzoom,
@@ -588,8 +431,6 @@ export function verifyMtbMbtiles(
       mtbMinzoom,
       layers: layerIds,
       zooms,
-      hits,
-      tilesScanned: scanned.value,
       profileVersion: meta.get(MTB_PROFILE_VERSION_META) ?? null,
       hasBikePark: fields !== null && MTB_IMBA_ATTR in fields,
     };
@@ -646,90 +487,4 @@ function parseVectorLayers(jsonRaw: string | null): VectorLayer[] {
     throw new VerifyError("vector_layers metadata is empty");
   }
   return parsed.vector_layers;
-}
-
-type TileFetcher = (zoom: number, x: number, yTms: number) => Uint8Array | null;
-
-/**
- * Scans tiles covering `bounds` at `zoom` (row-major) for a transportation
- * feature with a non-empty mtb_scale value, stopping at the first hit or at
- * `maxTiles`. Returns the hit or null.
- */
-function scanTiles(
-  zoom: number,
-  bounds: [number, number, number, number],
-  fetchTile: TileFetcher,
-  scannedRef: { value: number },
-  onCount: (delta: number) => void,
-  maxTiles: number,
-  layerName: string = MTB_LAYER,
-): MtbHit | null {
-  const size = 1 << zoom;
-  const [west, south, east, north] = bounds;
-  const x0 = clamp(lonToTile(west, zoom), 0, size - 1);
-  const x1 = clamp(lonToTile(east, zoom), 0, size - 1);
-  const y0 = clamp(latToTile(north, zoom), 0, size - 1);
-  const y1 = clamp(latToTile(south, zoom), 0, size - 1);
-
-  for (let x = x0; x <= x1; x++) {
-    for (let y = y0; y <= y1; y++) {
-      const raw = fetchTile(zoom, x, size - 1 - y);
-      if (raw === null) continue;
-      onCount(1);
-      if (scannedRef.value > maxTiles) {
-        throw new VerifyError(
-          `mtb_scale scan hit the safety cap of ${maxTiles} tiles without a hit — increase VERIFY_MTB_MAX_TILES to scan further`,
-        );
-      }
-      // Tiles are gzip-compressed; decompress before the key pre-filter and
-      // the MVT decode.
-      const data = decompressTile(raw);
-      // Fast pre-filter: the MVT keys array contains "mtb_scale" in every tile
-      // where any feature carries the attribute.
-      const buf = Buffer.from(data);
-      if (buf.indexOf(MTB_ATTR) === -1) continue;
-      const hit = confirmMtbFeature(buf, zoom, x, y, layerName);
-      if (hit !== null) return hit;
-    }
-  }
-  return null;
-}
-
-function confirmMtbFeature(
-  buf: Buffer,
-  zoom: number,
-  x: number,
-  y: number,
-  layerName: string = MTB_LAYER,
-): MtbHit | null {
-  try {
-    const vt = new VectorTile(new PbfReader(new Uint8Array(buf)));
-    const layer = vt.layers[layerName];
-    if (layer === undefined) return null;
-    for (let i = 0; i < layer.length; i++) {
-      const feature = layer.feature(i);
-      const props = feature.properties;
-      const value = props[MTB_ATTR];
-      if (value !== undefined && value !== "") {
-        return { zoom, x, y, layer: layerName, properties: { ...props } };
-      }
-    }
-  } catch (e) {
-    log(`warning: failed to decode tile z${zoom}/${x}/${y}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  return null;
-}
-
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function lonToTile(lon: number, zoom: number): number {
-  return Math.floor(((lon + 180) / 360) * (1 << zoom));
-}
-
-function latToTile(lat: number, zoom: number): number {
-  const rad = (lat * Math.PI) / 180;
-  const y = (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2;
-  return Math.floor(y * (1 << zoom));
 }

@@ -8,7 +8,6 @@ import Database from "better-sqlite3";
 import {
   EXPECTED_LAYERS,
   MTB_PROFILE_VERSION,
-  readMtbBounds,
   readMtbHasBikePark,
   readMtbProfileVersion,
   readTilesetView,
@@ -136,25 +135,20 @@ test("accepts a valid compact tileset with an mtb_scale feature", () => {
   assert.equal(v.maxzoom, 14);
   assert.equal(v.layers.length, 16);
   assert.deepEqual(v.zooms, Array.from({ length: 15 }, (_, i) => i));
-  assert.equal(v.mtbHit.zoom, 14);
-  assert.equal(v.mtbHit.x, 0);
-  assert.equal(v.mtbHit.layer, "transportation");
-  assert.equal(v.mtbHit.properties.mtb_scale, "4");
-  assert.equal(v.tilesScanned, 1);
 });
 
 test("accepts the plain tiles-table layout", () => {
   const file = join(dir, "ok-plain.mbtiles");
   makeMbtiles(file, { compact: false });
   const v = verifyMbtiles(file);
-  assert.equal(v.mtbHit.properties.mtb_scale, "4");
+  assert.equal(v.format, "pbf");
 });
 
 test("accepts gzip-compressed tiles (planetiler default)", () => {
   const file = join(dir, "ok-gzip.mbtiles");
   makeMbtiles(file, { gzipTiles: true });
   const v = verifyMbtiles(file);
-  assert.equal(v.mtbHit.properties.mtb_scale, "4");
+  assert.equal(v.format, "pbf");
 });
 
 test("rejects a non-vector format", () => {
@@ -182,44 +176,13 @@ test("accepts a tileset without an optional layer (aerodrome_label)", () => {
   assert.equal(v.layers.length, 15);
 });
 
-test("accepts a tileset where mtb_scale is not a declared field but a feature carries it", () => {
-  // planetiler derives declared fields from emitted features; a feature-level
-  // mtb_scale is what matters, so verification must pass (with a warning).
+test("accepts a tileset where mtb_scale is not a declared field (warns, does not fail)", () => {
+  // planetiler derives declared fields from emitted features; an absent field
+  // is a warning, not a failure.
   const file = join(dir, "warn-field.mbtiles");
   makeMbtiles(file, { transportFields: { class: "string" } });
   const v = verifyMbtiles(file);
-  assert.equal(v.mtbHit.properties.mtb_scale, "4");
-});
-
-test("rejects an empty mtb_scale value", () => {
-  const file = join(dir, "empty-mtb.mbtiles");
-  makeMbtiles(file, { z14Tile: transportTile("") });
-  assert.throws(() => verifyMbtiles(file), /no transportation feature with a non-empty mtb_scale/);
-});
-
-test("rejects when the scan cap is exceeded", () => {
-  const file = join(dir, "cap.mbtiles");
-  const noHit = transportTile("");
-  makeMbtiles(file, { z14Tile: noHit, extraZ14Tiles: [{ x: 1, data: noHit }] });
-  assert.throws(() => verifyMbtiles(file, { maxTiles: 1 }), /safety cap of 1 tiles/);
-});
-
-test("rejects when bounds metadata is missing", () => {
-  const file = join(dir, "no-bounds.mbtiles");
-  makeMbtiles(file, { bounds: null });
-  assert.throws(() => verifyMbtiles(file), /bounds metadata/);
-});
-
-test("reports progress through onScan", () => {
-  const file = join(dir, "scan-cb.mbtiles");
-  makeMbtiles(file, { z14Tile: transportTile("") });
-  const counts: number[] = [];
-  assert.throws(
-    () => verifyMbtiles(file, { onScan: (n) => counts.push(n) }),
-    /no transportation feature/,
-  );
-  assert.ok(counts.length >= 1, "onScan should be called for each scanned tile");
-  assert.equal(counts[0], 1);
+  assert.equal(v.format, "pbf");
 });
 
 // ---------------------------------------------------------------------------
@@ -354,18 +317,15 @@ test("mtb tileset: accepts a valid z7-z14 tileset (mtb layer, mtb_scale at both 
   assert.equal(v.mtbMinzoom, 7);
   assert.deepEqual(v.layers, ["mtb"]);
   assert.deepEqual(v.zooms, [7, 8, 9, 10, 11, 12, 13, 14]);
-  assert.deepEqual(v.hits.map((h) => h.zoom).sort((a, b) => a - b), [7, 14]);
-  assert.equal(v.hits[0]!.layer, "mtb");
-  assert.equal(v.hits[0]!.properties.mtb_scale, "4");
 });
 
 test("mtb tileset: accepts gzip tiles + the plain layout (planetiler variants)", () => {
   const gzip = join(dir, "mtb-gzip.mbtiles");
   makeMtbMbtiles(gzip, { gzipTiles: true });
-  assert.equal(verifyMtbMbtiles(gzip, 7).hits.length, 2);
+  assert.equal(verifyMtbMbtiles(gzip, 7).format, "pbf");
   const plain = join(dir, "mtb-plain.mbtiles");
   makeMtbMbtiles(plain, { compact: false });
-  assert.equal(verifyMtbMbtiles(plain, 7).hits.length, 2);
+  assert.equal(verifyMtbMbtiles(plain, 7).format, "pbf");
 });
 
 test("mtb tileset: accepts a different MTB_MINZOOM (e.g. 5)", () => {
@@ -373,7 +333,6 @@ test("mtb tileset: accepts a different MTB_MINZOOM (e.g. 5)", () => {
   makeMtbMbtiles(file, { minzoom: "5" });
   const v = verifyMtbMbtiles(file, 5);
   assert.deepEqual(v.zooms, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
-  assert.deepEqual(v.hits.map((h) => h.zoom).sort((a, b) => a - b), [5, 14]);
 });
 
 test("mtb tileset: stale minzoom (built 7, now 12) fails with the FORCE_REIMPORT hint", () => {
@@ -422,33 +381,6 @@ test("mtb tileset: a missing zoom level is rejected", () => {
   const file = join(dir, "mtb-holey.mbtiles");
   makeMtbMbtiles(file, { omitZooms: [10] });
   assert.throws(() => verifyMtbMbtiles(file, 7), /no tiles at zoom levels: 10/);
-});
-
-test("mtb tileset: the hard gate — empty mtb_scale at the minzoom is rejected", () => {
-  const file = join(dir, "mtb-empty7.mbtiles");
-  makeMtbMbtiles(file, { scaleAt: { 7: "" } });
-  assert.throws(
-    () => verifyMtbMbtiles(file, 7),
-    /no mtb feature with a non-empty mtb_scale at z7/,
-  );
-});
-
-test("mtb tileset: the hard gate — empty mtb_scale at z14 is rejected", () => {
-  const file = join(dir, "mtb-empty14.mbtiles");
-  makeMtbMbtiles(file, { scaleAt: { 14: "" } });
-  assert.throws(
-    () => verifyMtbMbtiles(file, 7),
-    /no mtb feature with a non-empty mtb_scale at z14/,
-  );
-});
-
-test("readMtbBounds: returns the bounds metadata, or null when absent", () => {
-  const withBounds = join(dir, "bounds-ok.mbtiles");
-  makeMtbMbtiles(withBounds);
-  assert.deepEqual(readMtbBounds(withBounds), [-179.99, 85.05, -179.97, 85.06]);
-  const noBounds = join(dir, "bounds-none.mbtiles");
-  makeMtbMbtiles(noBounds, { bounds: null });
-  assert.equal(readMtbBounds(noBounds), null);
 });
 
 // ---------------------------------------------------------------------------

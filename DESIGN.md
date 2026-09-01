@@ -86,13 +86,18 @@ checking → [downloading → building → verify] → [mtb building → verify]
 - **checking** — probe the toolchain (Java can run both profile jars) and check
   for an existing `openmaptiles.mbtiles`. Decide the MTB artifact's fate up front
   (skip / build / fail-fast on a stale minzoom).
-- **downloading** — stream the OSM PBF to `$OSM_FILE` with byte-accurate progress.
+- **downloading** — resolve the OSM extract to build from, then build. A present
+  downloaded extract (`$OSM_DOWNLOAD_FILE`) wins over a mounted seed (`$OSM_FILE`);
+  only when neither exists (or on a forced re-import) is the newest dated `.osm.pbf`
+  link resolved from `OSM_LISTING_URL` and streamed (byte-accurate progress) into the
+  writable `$OSM_DOWNLOAD_FILE`. The seed is a read-only fallback the app never writes
+  or deletes, so a read-only bind mount keeps working.
 - **building** — run the OMT profile jar, then the mtb-profile jar (see below);
   per-stage progress is mapped from Planetiler's log onto a single 0–100 bar.
-- **verify** — decode real tiles and assert: required layers present, zoom range
-  z0–z14, and a **hard gate** that a non-empty `mtb_scale` feature actually exists
-  (basemap at z14; MTB tileset at both its minzoom and z14). A region with no
-  `mtb:scale` data is rejected, not silently served.
+- **verify** — assert the artifact's metadata: required layers present, zoom range
+  z0–z14, and (for the MTB tileset) the `mtb` layer with a declared `mtb_scale`
+  field. No tile content is scanned — this keeps startup fast and non-blocking
+  (a region with sparse trail data is still served).
 - **starting** — spawn Martin, poll `/health`, verify `/catalog` exposes both
   expected sources as MVT, then run a render smoke test that fetches + decodes
   real tiles over HTTP.
@@ -103,6 +108,51 @@ Fail-fast is a theme: a broken toolchain, a stale MTB minzoom, a missing require
 layer, or an incompatible style is all caught **before** the browser ever loads,
 with an actionable message (including a heap-`OOM` hint that names the env var to
 raise).
+
+### Re-import (on demand)
+
+The map can update its OSM-derived tilesets without a container restart. The
+elevation tileset (`dem.mbtiles`) is never touched — it is an external artifact,
+not part of this app's build.
+
+- **UI trigger** — the info panel's **Update data** button calls
+  `POST /api/reimport`, then polls `GET /api/reimport` while the job is
+  `running`. On `success` it briefly shows "Done" and reloads the page (new
+  data date + fresh tiles); on `error` it shows "Reimport failed — contact
+  admin."; on `no-newer-dataset` it shows "Data is already up to date." The
+  button stays disabled once an attempt has been recorded for the day.
+- **API**
+  - `GET /api/reimport` — coarse state for the UI:
+    `idle` / `running` / `success` / `error` / `no-newer-dataset`.
+  - `POST /api/reimport` — single call that starts the job in the background
+    and returns immediately:
+    - `202 { started: true, latestDate }`
+    - `409 { error: "already-running" | "already-attempted-today" |
+      "no-newer-dataset" }`
+    - `502 { error: "cannot-determine-latest" }`
+    - `503 { error: "tile-server-not-ready" }`
+- **Gating** — server-side, enforced even for direct API calls:
+  1. **Single in-flight** — an in-process flag rejects a concurrent trigger with
+     `409 already-running`.
+  2. **Once per local day** — `REIMPORT_STATE_FILE` (default
+     `/data/last-reimport.json`) records that an attempt was made; a same-day
+     retry gets `409 already-attempted-today` **without contacting the data
+     server**. Delete the state file to reset and allow another attempt.
+- **Upstream check** — parse `OSM_LISTING_URL` for the newest dated
+  `*.osm.pbf` link and compare its date to the currently recorded `dataDate`.
+  Only strictly newer dates proceed.
+- **Build + swap** — a forced re-import always downloads a FRESH extract into the
+  writable `OSM_DOWNLOAD_FILE` (ignoring any mounted seed), then reuses the normal
+  pipeline to build fresh `openmaptiles.staging.mbtiles` and `mtb.staging.mbtiles`,
+  verify them, and atomically rename them over the live artifacts. The mounted seed
+  (`OSM_FILE`) is never deleted or overwritten, and `dem.mbtiles` is untouched.
+- **Serving continuity** — Martin is restarted only after the rename; because
+  it holds the old files open, the map keeps serving until the restart swaps
+  in the new artifacts.
+- **Failure handling** — a failed build removes the staging files, leaves the
+  live map intact, and records `error` in the state file. A crash mid-build is
+  reconciled to `error` on the next boot, and any leftover `*.staging.mbtiles`
+  is cleaned up.
 
 ### The tilesets
 
@@ -148,6 +198,11 @@ service the browser never reaches directly.
   font-stack glyph request to the first vendored font that provides the range
   (MapLibre 6.x does not fall back per-font).
 - `GET /api/status` — the pipeline status snapshot.
+- `GET /api/reimport` — the on-demand re-import state (`idle` / `running` /
+  `success` / `error` / `no-newer-dataset`).
+- `POST /api/reimport` — trigger an on-demand re-import in the background
+  (`202` started; `409` rejected for concurrency/day-limit/no-newer; `502`/`503`
+  for upstream/availability failures).
 - `GET /` + `GET /assets/…` — the built UI: the React app with MapLibre GL JS
   bundled in (self-contained, no CDN, works offline).
 - Everything else in `public/` — static (sprite, glyph fonts).
@@ -174,11 +229,12 @@ service the browser never reaches directly.
   single **layers panel** — one round layers icon that expands into the trail
   toggles + opacity sliders and, when a `dem` source is served, the 3D view /
   hillshade / contour lines toggles, see below) plus a scale (bottom-left) and
-  a single round **info control** (bottom-right, collapsed by default) that
-  expands into a panel holding the difficulty legend (ramp swatches + level names +
-  `+/−` note) **and** the data-source credits — MapLibre's own attribution control
-  is disabled, so the ⓘ is the map's only attribution chrome. A default
-  `fitBounds` fits the mainland Norway extent.
+   a single round **info control** (bottom-right, collapsed by default) that
+   expands into a panel holding the difficulty legend (ramp swatches + level names +
+   `+/−` note), the data date, an **Update data** button for the on-demand
+   re-import, and the data-source credits — MapLibre's own attribution control
+   is disabled, so the ⓘ is the map's only attribution chrome. A default
+   `fitBounds` fits the mainland Norway extent.
 
 ### Elevation: 3D terrain, hillshade & contour lines (optional)
 
@@ -377,11 +433,15 @@ var agree.
 │   ├── assets/              # Bundled UI (React + MapLibre + CSS)
 │   └── (style.json, sprite*, glyph dirs — vendored at build time)
 ├── src/                     # Node/TS orchestrator (compiled to dist/)
-│   ├── server.ts            # Express app: routes, proxy, style, mount
-│   ├── pipeline.ts          # Startup orchestration + fail-fast checks
-│   ├── build.ts             # Spawn the two Planetiler jars, stream progress
-│   ├── download.ts          # Streamed OSM PBF download with progress
-│   ├── verify.ts            # MBTiles/MVT artifact verification (SQLite + MVT)
+ │   ├── server.ts            # Express app: routes, proxy, style, mount
+ │   ├── pipeline.ts          # Startup orchestration + fail-fast checks
+ │   ├── build.ts             # Spawn the two Planetiler jars, stream progress
+ │   ├── download.ts          # Streamed OSM PBF download with progress
+ │   ├── upstream.ts          # Geofabrik listing parse (newest dated .osm.pbf)
+ │   ├── reimport-state.ts    # Persisted attempt state + staging cleanup
+ │   ├── reimport.ts          # On-demand re-import orchestration (trigger/status)
+ │   ├── reimport-api.ts      # Express router for GET/POST /api/reimport
+ │   ├── verify.ts            # MBTiles/MVT artifact verification (SQLite + MVT)
 │   ├── style.ts             # Style loading, source rewrite, serving checks
 │   ├── martin.ts            # Spawn/supervise Martin, catalog/layer checks
 │   ├── tiles.ts             # Streaming /tiles/… proxy to Martin
@@ -434,8 +494,9 @@ ODbL, this application and any redistribution of the data must:
 - License any database created from this data under the ODbL.
 - Provide a link to the ODbL: <https://opendatacommons.org/licenses/odbl/>.
 
-Data source for Norway: Geofabrik,
-<https://download.geofabrik.de/europe/norway-latest.osm.pbf>.
+Data source for Norway: Geofabrik's listing page
+(<https://download.geofabrik.de/europe/norway.html>), from which the app resolves
+the newest dated `.osm.pbf` release to download.
 
 Third-party tools and data:
 

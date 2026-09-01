@@ -3,9 +3,13 @@ import path from "node:path";
 import express from "express";
 import { loadConfig } from "./config.js";
 import { log } from "./log.js";
-import { runPipeline } from "./pipeline.js";
+import { buildTilesets, runPipeline } from "./pipeline.js";
 import type { MartinServer } from "./martin.js";
 import { status } from "./status.js";
+import { getLatestDatasetDate } from "./upstream.js";
+import { readOsmDataDate } from "./osm-date.js";
+import { reimportState, reconcileReimportOnBoot, triggerReimport } from "./reimport.js";
+import { createReimportRouter } from "./reimport-api.js";
 import { resolveGlyphFile } from "./fonts.js";
 import {
   buildAppOrigin,
@@ -29,6 +33,8 @@ const cfg = loadConfig();
 const inner = express();
 inner.disable("x-powered-by");
 
+let martin: MartinServer | undefined;
+
 // Glyph fonts are gitignored and fetched (Dockerfile at build time; locally
 // via `npm run vendor-fonts`) — warn early if they are missing, otherwise
 // map labels silently fail to render in the browser.
@@ -47,6 +53,28 @@ inner.get("/api/status", (_req, res) => {
   res.json(status.snapshot());
 });
 
+inner.use(
+  createReimportRouter({
+    martinReady: () => martin !== undefined,
+    trigger: () => {
+      const m = martin;
+      if (!m) throw new Error("martin not ready");
+      return triggerReimport({
+        cfg,
+        lastReimportFile: cfg.reimportStateFile,
+        currentDataDate: readOsmDataDate(
+          cfg.mbtilesFile,
+          existsSync(cfg.osmDownloadFile) ? cfg.osmDownloadFile : cfg.osmFile,
+        ),
+        getLatestDatasetDate: () => getLatestDatasetDate(cfg.osmListingUrl),
+        buildTilesets,
+        martin: m,
+      });
+    },
+    state: () => reimportState({ lastReimportFile: cfg.reimportStateFile }),
+  }),
+);
+
 // Step 12 (single-port serving): ALL browser traffic goes through the app's
 // single port. Martin is an internal, loopback-bound service the browser
 // never reaches directly — this proxy forwards /tiles/<source>/<z>/<x>/<y>
@@ -56,7 +84,6 @@ inner.get("/api/status", (_req, res) => {
 // startup, so the URL is read per request (503 until it exists). Registered
 // before the static handler; the 4-segment path cannot collide with the
 // 2-segment /:fontstack/:range route.
-let martin: MartinServer | undefined;
 // When a dem tileset is served, register it so a MISSING dem tile (Martin's
 // 204 No Content) is answered with a valid flat "no data" PNG instead of an
 // empty body. An empty body makes the dem client's createImageBitmap throw
@@ -162,6 +189,8 @@ if (cfg.basePath) {
 } else {
   app.use(inner);
 }
+
+reconcileReimportOnBoot(cfg.dataDir, cfg.reimportStateFile);
 
 const server = app.listen(cfg.port, () => {
   log(

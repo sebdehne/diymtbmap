@@ -27,7 +27,22 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Remove a finished extract and its partial file (used by FORCE_REIMPORT). */
 export function clearArtifact(file: string): void {
   for (const p of [file, `${file}.part`]) {
-    if (existsSync(p)) unlinkSync(p);
+    if (!existsSync(p)) continue;
+    try {
+      unlinkSync(p);
+      log(`cleared artifact: ${p}`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === "EBUSY") {
+        throw new Error(
+          `cannot remove ${p}: ${message} — this usually means the file is a read-only bind mount or a mount point; ` +
+            `keep the mounted seed at $OSM_FILE (read-only is fine) and point the writable $OSM_DOWNLOAD_FILE ` +
+            `inside the data volume so fresh extracts have somewhere to go`,
+          { cause: e },
+        );
+      }
+      throw new Error(`cannot remove ${p}: ${message}`, { cause: e });
+    }
   }
 }
 
