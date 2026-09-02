@@ -21,6 +21,7 @@ import {
   applyOverlayOpacity,
   bikeParkOverlayLayers,
   mtbOverlayLayers,
+  firstSymbolLayerId,
 } from "../../shared/mtb-overlay.js";
 import { makeInfoControl } from "./components/InfoControl.jsx";
 import { makeLayerControl } from "./components/LayerControl.jsx";
@@ -186,10 +187,18 @@ export default function MapView({ status }) {
     m.addControl(makeInfoControl(status), "bottom-right");
 
     m.on("load", () => {
-      // Overlay last → above every basemap layer. Both trail groups are added
-      // so the natural/bike-park toggles have layers to show and hide.
-      for (const layer of mtbOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer);
-      for (const layer of bikeParkOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer);
+      // Position the non-symbol overlays (MTB trails, hillshade, contour
+      // lines) BETWEEN the basemap content and its labels: insert them before
+      // the first symbol (text) layer, so the basemap's text/icons stay on top
+      // and readable instead of being covered by the overlay lines. `beforeId`
+      // is undefined (→ append last, the old behavior) when the style has no
+      // symbol layer. The app's own elevation label layer is added last (on
+      // top) so it stays visible.
+      const beforeId = firstSymbolLayerId(m.getStyle());
+      // Both trail groups are added so the natural/bike-park toggles have
+      // layers to show and hide.
+      for (const layer of mtbOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer, beforeId);
+      for (const layer of bikeParkOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer, beforeId);
       // Restore the visitor's layer choices (defaults: trails ON at half
       // opacity, 3D view ON, hillshade ON, contour lines ON) from the single
       // persisted state the layers panel writes. The layers only exist after
@@ -232,9 +241,11 @@ export default function MapView({ status }) {
             // native range so the map's max zoom stays rendered.
             maxzoom: demMaxzoom + 4,
           });
-          // Draw order: hillshade first, then the contour lines, then labels.
-          m.addLayer(hillshadeLayerSpec(demSource));
-          m.addLayer(contourLineSpec(CONTOUR_SOURCE_ID));
+          // Draw order: hillshade first, then the contour lines — both BELOW
+          // the basemap labels (beforeId) so the basemap's text stays readable —
+          // then the app's own elevation labels, on top of everything.
+          m.addLayer(hillshadeLayerSpec(demSource), beforeId);
+          m.addLayer(contourLineSpec(CONTOUR_SOURCE_ID), beforeId);
           m.addLayer(contourLabelSpec(CONTOUR_SOURCE_ID));
           // The elevation layers only exist now: apply their persisted
           // visibility (their helpers only check for the layer, so an early

@@ -22,6 +22,7 @@ import {
   bikeParkColorEntries,
   bikeParkColorExpression,
   bikeParkOverlayLayers,
+  firstSymbolLayerId,
   mtbColorEntries,
   mtbColorExpression,
   mtbOverlayLayers,
@@ -408,6 +409,35 @@ test("applyOverlayOpacity: safe before layers exist (no throw, no calls)", () =>
   // A map without the paint API (or null) must not throw either.
   applyOverlayOpacity(null, { opacity: { natural: 0.5 } });
   applyOverlayOpacity({}, { opacity: { natural: 0.5 } });
+});
+
+test("firstSymbolLayerId: the first symbol (label) layer id", () => {
+  const style = {
+    layers: [
+      { id: "Background", type: "background" },
+      { id: "Water", type: "fill" },
+      { id: "Road", type: "line" },
+      { id: "River labels", type: "symbol" },
+      { id: "City labels", type: "symbol" },
+    ],
+  };
+  assert.equal(firstSymbolLayerId(style), "River labels", "returns the FIRST symbol layer");
+});
+
+test("firstSymbolLayerId: undefined for no symbol layer / bad input (fallback = append last)", () => {
+  assert.equal(firstSymbolLayerId({ layers: [{ id: "a", type: "fill" }] }), undefined, "no symbol layer");
+  assert.equal(firstSymbolLayerId({ layers: [] }), undefined, "empty layers");
+  assert.equal(firstSymbolLayerId({}), undefined, "no layers key");
+  assert.equal(firstSymbolLayerId(undefined), undefined, "undefined style");
+});
+
+test("firstSymbolLayerId: matches the vendored basemap's first label layer (if present)", () => {
+  const styleFile = new URL("../public/style.json", import.meta.url);
+  if (!existsSync(styleFile)) return; // style is gitignored / vendored
+  const style = JSON.parse(readFileSync(styleFile, "utf8"));
+  const first = firstSymbolLayerId(style);
+  assert.ok(first, "the OMT style has a symbol layer to insert before");
+  assert.equal(style.layers.find((l) => l.id === first)?.type, "symbol", "that layer is a symbol layer");
 });
 
 test("overlay layer ids do not collide with the basemap style (if vendored)", () => {

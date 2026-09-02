@@ -246,6 +246,24 @@ export function bikeParkOverlayLayers(source = MTB_SOURCE, minzoom = MTB_MINZOOM
   });
 }
 
+/**
+ * The id of the FIRST symbol (text-label) layer in a MapLibre style document,
+ * or `undefined` when there is none. MapView passes it as the `beforeId` of
+ * `map.addLayer` so the non-symbol overlays (MTB trails, hillshade, contour
+ * lines) are inserted BETWEEN the basemap content and its labels — the
+ * basemap's text/icons stay on top and readable instead of being covered by
+ * the overlay lines. A style with no symbol layer returns `undefined`, and
+ * `addLayer(layer, undefined)` appends last (the pre-change behavior).
+ */
+export function firstSymbolLayerId(style) {
+  const layers = style?.layers;
+  if (!Array.isArray(layers)) return undefined;
+  for (const layer of layers) {
+    if (layer?.type === "symbol") return layer.id;
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Overlay groups (drives the UI toggles + legends)
 // ---------------------------------------------------------------------------
