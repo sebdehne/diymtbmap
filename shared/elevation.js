@@ -137,7 +137,7 @@ export function contourLineSpec(source = CONTOUR_SOURCE_ID) {
         CONTOUR_MAJOR_LINE_COLOR,
         CONTOUR_LINE_COLOR,
       ],
-      "line-width": ["match", ["get", LEVEL_KEY], 1, 1.25, 0.5],
+      "line-width": ["match", ["get", LEVEL_KEY], 1, 0.8, 0.5],
     },
   };
 }

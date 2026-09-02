@@ -80,9 +80,9 @@ test("elevation: contour line layer is a `line` on the contour source, styled by
   // it would render bold + labeled "0 m" right along the coast.
   assert.deepEqual(spec.filter, [">", ["get", ELEVATION_KEY], 0]);
   // Width + color are driven by the level property (1 = major, 0 = minor).
-  // line-width = ["match", ["get","level"], 1, 1.25, 0.5] -> major (level 1) is
-  // bolder/wider (1.25) than minor (0.5, the match default).
-  assert.deepEqual(spec.paint["line-width"], ["match", ["get", LEVEL_KEY], 1, 1.25, 0.5]);
+  // line-width = ["match", ["get","level"], 1, 0.8, 0.5] -> major (level 1) is
+  // bolder/wider (0.8) than minor (0.5, the match default).
+  assert.deepEqual(spec.paint["line-width"], ["match", ["get", LEVEL_KEY], 1, 0.8, 0.5]);
   assert.ok(Array.isArray(spec.paint["line-color"]));
   // A custom source id is honored.
   assert.equal(contourLineSpec("my-contours").source, "my-contours");
