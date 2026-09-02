@@ -11,6 +11,13 @@ import {
   MTB_COLORS,
   MTB_FALLBACK_COLOR,
   MTB_LABELS,
+  MTB_LABEL_COLOR,
+  MTB_LABEL_FONT,
+  MTB_LABEL_HALO_COLOR,
+  MTB_LABEL_MINZOOM,
+  MTB_LABEL_OFFSET,
+  MTB_LABEL_SIZE,
+  MTB_LABEL_SPACING,
   MTB_LINE_OPACITY,
   MTB_MINZOOM,
   MTB_SOURCE,
@@ -104,9 +111,9 @@ function widthStops(widthExpr: unknown[]): Map<number, number> {
   return stops;
 }
 
-test("mtbOverlayLayers: casing + colored line, correct source/filter/minzoom", () => {
+test("mtbOverlayLayers: casing + colored line + name label, correct source/filter/minzoom", () => {
   const layers = mtbOverlayLayers();
-  assert.equal(layers.length, 2);
+  assert.equal(layers.length, 3, "casing, line, then the trail-name label");
   const [casing, line] = layers;
 
   assert.equal(casing?.id, "mtb-casing");
@@ -177,6 +184,60 @@ test("step 11: mtbOverlayLayers honors a custom source + minzoom (from the statu
 });
 
 // ---------------------------------------------------------------------------
+// Trail name labels (mtb:name) — symbol layer, z12+, offset off the centerline
+// ---------------------------------------------------------------------------
+
+test("MTB name-label constants are sensible", () => {
+  assert.equal(MTB_LABEL_MINZOOM, 12, "labels appear from z12 (tileset spans z7–z14, so z12 tiles exist)");
+  assert.equal(MTB_LABEL_OFFSET[0], 0, "no along-the-trail offset");
+  assert.ok(MTB_LABEL_OFFSET[1] > 0, "a perpendicular offset (off-center, clears the basemap name)");
+  assert.ok(Array.isArray(MTB_LABEL_FONT) && MTB_LABEL_FONT.length >= 1, "a glyph font stack");
+  assert.match(MTB_LABEL_COLOR, /^#[0-9a-f]{6}$/i, "a hex text color");
+  assert.match(MTB_LABEL_HALO_COLOR, /^rgba?\(/, "a halo color carrying its own opacity");
+});
+
+test("mtbOverlayLayers: the name label is a symbol layer reading mtb_name at z12+", () => {
+  const [, , label] = mtbOverlayLayers();
+  assert.ok(label, "the trail-name label is the 3rd layer");
+  assert.equal(label.id, "mtb-names-natural");
+  assert.equal(label.type, "symbol");
+  assert.equal(label.source, MTB_SOURCE);
+  assert.equal(label["source-layer"], MTB_SOURCE_LAYER);
+  assert.equal(label.minzoom, MTB_LABEL_MINZOOM, "labels start at z12, independent of the group's line minzoom");
+  // Only natural trails that actually carry a name are labeled.
+  assert.deepEqual(label.filter, ["all", ["has", "mtb_name"], NATURAL_FILTER]);
+  const layout = label.layout;
+  assert.equal(layout["symbol-placement"], "line", "text runs along the trail");
+  assert.equal(layout["symbol-spacing"], MTB_LABEL_SPACING, "spacing gates how early a name appears");
+  assert.equal(layout["text-rotation-alignment"], "map");
+  assert.deepEqual(layout["text-font"], MTB_LABEL_FONT);
+  assert.deepEqual(layout["text-offset"], MTB_LABEL_OFFSET, "offset off-center so it clears the basemap name");
+  assert.deepEqual(layout["text-field"], ["get", "mtb_name"], "labels the mtb:name (not the generic name)");
+  assert.deepEqual(layout["text-size"], MTB_LABEL_SIZE, "zoom-aware size so short trails can host the name");
+  assert.equal(label.paint["text-color"], MTB_LABEL_COLOR);
+  assert.equal(label.paint["text-halo-color"], MTB_LABEL_HALO_COLOR);
+  assert.ok(label.paint["text-halo-width"] > 0);
+});
+
+test("bikeParkOverlayLayers: the name label is filtered to bike-park trails", () => {
+  const [, , label] = bikeParkOverlayLayers();
+  assert.equal(label.id, "bikepark-names");
+  assert.equal(label.type, "symbol");
+  assert.equal(label.minzoom, MTB_LABEL_MINZOOM);
+  assert.deepEqual(label.filter, ["all", ["has", "mtb_name"], BIKEPARK_FILTER]);
+  assert.deepEqual(label.layout["text-field"], ["get", "mtb_name"]);
+  assert.deepEqual(label.layout["text-offset"], MTB_LABEL_OFFSET);
+});
+
+test("the name-label ids do not collide with either group's line ids", () => {
+  const naturalIds = mtbOverlayLayers().map((l) => l.id);
+  const bikeparkIds = bikeParkOverlayLayers().map((l) => l.id);
+  assert.ok(new Set(naturalIds).size === naturalIds.length, "natural group ids are unique");
+  assert.ok(new Set(bikeparkIds).size === bikeparkIds.length, "bike-park group ids are unique");
+  assert.ok(!naturalIds.includes("bikepark-names") && !bikeparkIds.includes("mtb-names-natural"), "no cross-group id");
+});
+
+// ---------------------------------------------------------------------------
 // Bike-park group (mtb:scale:imba), levels 0–4
 // ---------------------------------------------------------------------------
 
@@ -222,9 +283,9 @@ test("bikeParkColorExpression: match on raw mtb_imba, all levels + fallback", ()
   for (let i = 3; i < expr.length - 1; i += 2) assert.match(expr[i], /^#[0-9a-f]{6}$/i);
 });
 
-test("bikeParkOverlayLayers: casing + colored line, bikepark filter + imba color", () => {
+test("bikeParkOverlayLayers: casing + colored line + name label, bikepark filter + imba color", () => {
   const layers = bikeParkOverlayLayers();
-  assert.equal(layers.length, 2);
+  assert.equal(layers.length, 3, "casing, line, then the trail-name label");
   const [casing, line] = layers;
   assert.equal(casing?.id, "bikepark-casing");
   assert.equal(line?.id, "bikepark-imba");
@@ -282,14 +343,14 @@ test("OVERLAY_GROUPS: natural + bikepark, with matching layer ids", () => {
   const natural = byId.get("natural");
   assert.ok(natural, "natural group present");
   assert.equal(natural?.key, "mtb:scale");
-  assert.deepEqual(natural?.layerIds, ["mtb-casing", "mtb-scale"]);
+  assert.deepEqual(natural?.layerIds, ["mtb-casing", "mtb-scale", "mtb-names-natural"]);
   assert.equal(natural?.colors, MTB_COLORS);
   assert.equal(natural?.labels, MTB_LABELS);
 
   const bikepark = byId.get("bikepark");
   assert.ok(bikepark, "bikepark group present");
   assert.equal(bikepark?.key, "mtb:scale:imba");
-  assert.deepEqual(bikepark?.layerIds, ["bikepark-casing", "bikepark-imba"]);
+  assert.deepEqual(bikepark?.layerIds, ["bikepark-casing", "bikepark-imba", "bikepark-names"]);
   assert.equal(bikepark?.colors, IMBA_COLORS);
   assert.equal(bikepark?.labels, IMBA_LABELS);
 });
@@ -303,7 +364,10 @@ test("OVERLAY_GROUPS layer ids match what the layer builders emit", () => {
 
 test("applyOverlayVisibility: toggles each group's layers via the map API", () => {
   const calls: string[] = [];
-  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const layerSet = new Set([
+    "mtb-casing", "mtb-scale", "mtb-names-natural",
+    "bikepark-casing", "bikepark-imba", "bikepark-names",
+  ]);
   const fakeMap = {
     getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
     setLayoutProperty: (id: string, name: string, value: string) => {
@@ -312,23 +376,27 @@ test("applyOverlayVisibility: toggles each group's layers via the map API", () =
     },
   };
 
-  // All on (default) → everything visible.
+  // All on (default) → everything (lines + name labels) visible.
   applyOverlayVisibility(fakeMap, { natural: true, bikepark: true });
   assert.deepEqual(calls, [
     "mtb-casing=visible",
     "mtb-scale=visible",
+    "mtb-names-natural=visible",
     "bikepark-casing=visible",
     "bikepark-imba=visible",
+    "bikepark-names=visible",
   ]);
   calls.length = 0;
 
-  // Natural off, bikepark on → natural hidden, bikepark visible (independent).
+  // Natural off, bikepark on → natural (incl. its name label) hidden, bike-park visible.
   applyOverlayVisibility(fakeMap, { natural: false, bikepark: true });
   assert.deepEqual(calls, [
     "mtb-casing=none",
     "mtb-scale=none",
+    "mtb-names-natural=none",
     "bikepark-casing=visible",
     "bikepark-imba=visible",
+    "bikepark-names=visible",
   ]);
   calls.length = 0;
 
@@ -350,42 +418,54 @@ test("applyOverlayVisibility: safe before layers exist (no throw, no calls)", ()
   applyOverlayVisibility({}, { natural: false });
 });
 
-test("applyOverlayOpacity: sets line-opacity on each group's layers independently", () => {
+test("applyOverlayOpacity: fades each group's lines (line-opacity) AND name label (text-opacity)", () => {
   const calls: string[] = [];
-  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const layerTypes: Record<string, string> = {
+    "mtb-casing": "line", "mtb-scale": "line", "mtb-names-natural": "symbol",
+    "bikepark-casing": "line", "bikepark-imba": "line", "bikepark-names": "symbol",
+  };
   const fakeMap = {
-    getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
+    getLayer: (id: string) => (layerTypes[id] ? { type: layerTypes[id] } : undefined),
     setPaintProperty: (id: string, name: string, value: number) => {
-      assert.equal(name, "line-opacity");
-      calls.push(`${id}=${value}`);
+      calls.push(`${id}=${name}=${value}`);
     },
   };
 
-  // Per-group values apply to that group's casing + line only.
+  // Per-group values apply to that group's casing + line (line-opacity) and its
+  // name label (text-opacity) — the slider fades the line and its name together.
   applyOverlayOpacity(fakeMap, { opacity: { natural: 0.8, bikepark: 0.25 } });
   assert.deepEqual(calls, [
-    "mtb-casing=0.8",
-    "mtb-scale=0.8",
-    "bikepark-casing=0.25",
-    "bikepark-imba=0.25",
+    "mtb-casing=line-opacity=0.8",
+    "mtb-scale=line-opacity=0.8",
+    "mtb-names-natural=text-opacity=0.8",
+    "bikepark-casing=line-opacity=0.25",
+    "bikepark-imba=line-opacity=0.25",
+    "bikepark-names=text-opacity=0.25",
   ]);
 });
 
 test("applyOverlayOpacity: skips missing/invalid values (leaves layers untouched)", () => {
   const calls: string[] = [];
-  const layerSet = new Set(["mtb-casing", "mtb-scale", "bikepark-casing", "bikepark-imba"]);
+  const layerTypes: Record<string, string> = {
+    "mtb-casing": "line", "mtb-scale": "line", "mtb-names-natural": "symbol",
+    "bikepark-casing": "line", "bikepark-imba": "line", "bikepark-names": "symbol",
+  };
   const fakeMap = {
-    getLayer: (id: string) => (layerSet.has(id) ? {} : undefined),
-    setPaintProperty: (id: string, _name: string, value: number) => calls.push(`${id}=${value}`),
+    getLayer: (id: string) => (layerTypes[id] ? { type: layerTypes[id] } : undefined),
+    setPaintProperty: (id: string, name: string, value: number) => calls.push(`${id}=${name}=${value}`),
   };
 
   // No opacity key at all → nothing applied.
   applyOverlayOpacity(fakeMap, {});
   assert.equal(calls.length, 0, "no opacity key → no calls");
-  // A group absent from opacity → that group untouched, the other applied.
+  // A group absent from opacity → that group untouched, the other applied (line + label).
   calls.length = 0;
   applyOverlayOpacity(fakeMap, { opacity: { natural: 0.7 } });
-  assert.deepEqual(calls, ["mtb-casing=0.7", "mtb-scale=0.7"]);
+  assert.deepEqual(calls, [
+    "mtb-casing=line-opacity=0.7",
+    "mtb-scale=line-opacity=0.7",
+    "mtb-names-natural=text-opacity=0.7",
+  ]);
   // Out-of-range / non-numeric values are rejected.
   calls.length = 0;
   applyOverlayOpacity(fakeMap, { opacity: { natural: 0, bikepark: 2 } });

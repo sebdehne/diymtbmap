@@ -196,9 +196,17 @@ export default function MapView({ status }) {
       // top) so it stays visible.
       const beforeId = firstSymbolLayerId(m.getStyle());
       // Both trail groups are added so the natural/bike-park toggles have
-      // layers to show and hide.
-      for (const layer of mtbOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer, beforeId);
-      for (const layer of bikeParkOverlayLayers(overlaySource, overlayMinzoom)) m.addLayer(layer, beforeId);
+      // layers to show and hide. Each group is now THREE layers: the casing +
+      // colored line (line layers) plus the trail-name label (a symbol layer).
+      // The lines go BELOW the basemap labels (beforeId) so the basemap text
+      // stays readable; the name labels go ON TOP (append) so they stay
+      // visible — the same on-top treatment the app's elevation labels get.
+      const overlayLayers = [
+        ...mtbOverlayLayers(overlaySource, overlayMinzoom),
+        ...bikeParkOverlayLayers(overlaySource, overlayMinzoom),
+      ];
+      for (const layer of overlayLayers) if (layer.type !== "symbol") m.addLayer(layer, beforeId);
+      for (const layer of overlayLayers) if (layer.type === "symbol") m.addLayer(layer);
       // Restore the visitor's layer choices (defaults: trails ON at half
       // opacity, 3D view ON, hillshade ON, contour lines ON) from the single
       // persisted state the layers panel writes. The layers only exist after

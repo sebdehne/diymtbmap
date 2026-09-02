@@ -147,6 +147,62 @@ export const MTB_CASING_COLOR = "#2b2b2b";
 /** Opacity of both the casing and the colored line (half strength over the basemap). */
 export const MTB_LINE_OPACITY = 0.5;
 
+// ---------------------------------------------------------------------------
+// Trail name labels (mtb:name) — drawn along the trail from z12 onwards
+// ---------------------------------------------------------------------------
+
+/**
+ * First zoom a trail NAME label is drawn: z12. The MTB tileset spans z7–z14, so
+ * z12 tiles exist and the label renders cleanly; it simply does not clutter the
+ * low-zoom overview. (Independent of the tileset's maxzoom and the group's line
+ * minzoom.)
+ */
+export const MTB_LABEL_MINZOOM = 12;
+
+/**
+ * Glyph stack for trail names. Both fonts are vendored under public/ (the same
+ * stack the basemap's own labels use), so no new font is fetched.
+ */
+export const MTB_LABEL_FONT = ["Open Sans Semibold", "Noto Sans Bold"];
+
+/**
+ * Trail-name text color (dark, reads over the light basemap) + a soft white
+ * halo. The halo carries its own opacity in the color's alpha channel —
+ * MapLibre has NO `text-halo-opacity` property, and an unknown paint property
+ * would make `addLayer` fail style validation and the layer silently never get
+ * added (same constraint the elevation labels document).
+ */
+export const MTB_LABEL_COLOR = "#2b2b2b";
+export const MTB_LABEL_HALO_COLOR = "rgba(255, 255, 255, 0.85)";
+export const MTB_LABEL_HALO_WIDTH = 1.25;
+
+/**
+ * Perpendicular offset of the name label from the trail centerline (units of
+ * the text size). `[0, 1]` sits one text-height to one side of the line so a
+ * way carrying BOTH a basemap `name` and a trail `mtb:name` shows them apart
+ * (the basemap label is centered on the line) instead of stacked. The text
+ * still runs parallel to the trail — only the anchor is shifted sideways.
+ */
+export const MTB_LABEL_OFFSET = [0, 1];
+
+/**
+ * `symbol-spacing` for the name label (px). In MapLibre this is BOTH the minimum
+ * on-screen trail length needed to host a label AND the minimum gap between
+ * repeated labels on long trails, so it couples "how early a name appears" with
+ * "how dense repeats get". 80 is the aggressive end we chose: an ~800 m trail
+ * hosts its name from z13 (~85 px) and longer trails from z12, at the cost of a
+ * label roughly every 80 px on long trails.
+ */
+export const MTB_LABEL_SPACING = 80;
+
+/**
+ * Zoom-aware `text-size`: 9 px at z12 growing to 12 px at z15, so a name fits on
+ * shorter low-zoom trails (smaller text needs less line to lay along). A plain
+ * number would not shrink for short trails and would only appear once the line
+ * is long enough for the fixed size.
+ */
+export const MTB_LABEL_SIZE = ["interpolate", ["linear"], ["zoom"], 12, 9, 15, 12];
+
 /**
  * Natural-group filter: a way is "natural" unless its mtb_kind says otherwise.
  * `coalesce` defaults a missing mtb_kind (old v1 tilesets) to "natural", so
@@ -177,16 +233,58 @@ function lineWidth(minzoom, factor) {
 }
 
 /**
- * Builds the two overlay layers for one trail group in draw order: dark
- * casing first, colored line on top. Unknown/junk difficulty values fall back
- * to a neutral gray (the match's final entry) so they never render as a
- * level. `source`/`minzoom` default to the production values but are
- * overridable from the served status snapshot.
+ * The trail-name label for one group: a `symbol` layer reading `mtb_name`
+  * (the trail-specific name, from the OSM `mtb:name` tag), drawn along the trail
+  * from z12 onwards (MTB_LABEL_MINZOOM, independent of the group's line
+ * minzoom). Only ways that actually carry `mtb_name` are labeled (the
+ * `["has", "mtb_name"]` clause), and the label is offset one text-height to one
+ * side of the centerline (MTB_LABEL_OFFSET) so a way with BOTH a basemap `name`
+ * and a trail `mtb:name` shows them apart. It inherits the group's `filter`
+ * (natural vs bike-park) so it toggles together with the group's lines — see
+ * OVERLAY_GROUPS layerIds + applyOverlayVisibility.
+ *
+ * `symbol-spacing` (MTB_LABEL_SPACING) + the zoom-aware `text-size`
+ * (MTB_LABEL_SIZE) decide when a name actually shows: a label only renders once
+ * the trail is long enough on screen to lay the text along, so short trails show
+ * their name later than long ones (the expected line-label behavior).
+ */
+function nameLabelSpec(source, labelId, filter) {
+  return {
+    id: labelId,
+    type: "symbol",
+    source,
+    "source-layer": MTB_SOURCE_LAYER,
+    minzoom: MTB_LABEL_MINZOOM,
+    filter: ["all", ["has", "mtb_name"], filter],
+    layout: {
+      "symbol-placement": "line",
+      "symbol-spacing": MTB_LABEL_SPACING,
+      "text-rotation-alignment": "map",
+      "text-font": MTB_LABEL_FONT,
+      "text-size": MTB_LABEL_SIZE,
+      "text-optional": true,
+      "text-offset": MTB_LABEL_OFFSET,
+      "text-field": ["get", "mtb_name"],
+    },
+    paint: {
+      "text-color": MTB_LABEL_COLOR,
+      "text-halo-color": MTB_LABEL_HALO_COLOR,
+      "text-halo-width": MTB_LABEL_HALO_WIDTH,
+    },
+  };
+}
+
+/**
+ * Builds the three overlay layers for one trail group in draw order: dark
+ * casing first, colored line on top, then the trail-name label. Unknown/junk
+ * difficulty values fall back to a neutral gray (the match's final entry) so
+ * they never render as a level. `source`/`minzoom` default to the production
+ * values but are overridable from the served status snapshot.
  */
 function groupLayers(
   source,
   minzoom,
-  { casingId, lineId, filter, colorExpression },
+  { casingId, lineId, filter, colorExpression, labelId },
 ) {
   const common = {
     type: "line",
@@ -215,13 +313,14 @@ function groupLayers(
         "line-opacity": MTB_LINE_OPACITY,
       },
     },
+    nameLabelSpec(source, labelId, filter),
   ];
 }
 
 /**
  * The natural MTB trail layers (mtb:scale). Layer ids: `mtb-casing`,
- * `mtb-scale`. Filtered to natural trails (mtb_kind != "bikepark"), with
- * back-compat for tilesets lacking mtb_kind.
+ * `mtb-scale`, `mtb-names-natural`. Filtered to natural trails
+ * (mtb_kind != "bikepark"), with back-compat for tilesets lacking mtb_kind.
  */
 export function mtbOverlayLayers(source = MTB_SOURCE, minzoom = MTB_MINZOOM) {
   return groupLayers(source, minzoom, {
@@ -229,13 +328,15 @@ export function mtbOverlayLayers(source = MTB_SOURCE, minzoom = MTB_MINZOOM) {
     lineId: "mtb-scale",
     filter: NATURAL_FILTER,
     colorExpression: mtbColorExpression(),
+    labelId: "mtb-names-natural",
   });
 }
 
 /**
  * The bike-park trail layers (mtb:scale:imba). Layer ids: `bikepark-casing`,
- * `bikepark-imba`. Filtered to bike-park trails (mtb_kind == "bikepark");
- * renders empty on tilesets built before the split (correct).
+ * `bikepark-imba`, `bikepark-names`. Filtered to bike-park trails
+ * (mtb_kind == "bikepark"); renders empty on tilesets built before the split
+ * (correct).
  */
 export function bikeParkOverlayLayers(source = MTB_SOURCE, minzoom = MTB_MINZOOM) {
   return groupLayers(source, minzoom, {
@@ -243,6 +344,7 @@ export function bikeParkOverlayLayers(source = MTB_SOURCE, minzoom = MTB_MINZOOM
     lineId: "bikepark-imba",
     filter: BIKEPARK_FILTER,
     colorExpression: bikeParkColorExpression(),
+    labelId: "bikepark-names",
   });
 }
 
@@ -273,7 +375,7 @@ export function firstSymbolLayerId(style) {
  * @property {string} id          stable id (also the key in the persisted toggle state)
  * @property {string} label       human label for the UI
  * @property {string} key         the OSM tag the group is built from
- * @property {string[]} layerIds  the two map layer ids (casing + line)
+  * @property {string[]} layerIds  the map layer ids (casing + line + name label)
  * @property {Record<string,string>} colors  difficulty color ramp (level → hex)
  * @property {Record<string,string>} labels  difficulty legend labels (level → text)
  * @property {string} note        a short note under the legend
@@ -289,7 +391,7 @@ export const OVERLAY_GROUPS = Object.freeze([
     id: "natural",
     label: "Natural MTB trails",
     key: "mtb:scale",
-    layerIds: Object.freeze(["mtb-casing", "mtb-scale"]),
+    layerIds: Object.freeze(["mtb-casing", "mtb-scale", "mtb-names-natural"]),
     colors: MTB_COLORS,
     labels: MTB_LABELS,
     note: "+ / − variants use the base level’s color",
@@ -298,7 +400,7 @@ export const OVERLAY_GROUPS = Object.freeze([
     id: "bikepark",
     label: "Bike-park trails",
     key: "mtb:scale:imba",
-    layerIds: Object.freeze(["bikepark-casing", "bikepark-imba"]),
+    layerIds: Object.freeze(["bikepark-casing", "bikepark-imba", "bikepark-names"]),
     colors: IMBA_COLORS,
     labels: IMBA_LABELS,
     note: "IMBA difficulty 0–4",
@@ -324,13 +426,14 @@ export function applyOverlayVisibility(map, state) {
 }
 
 /**
- * Applies per-group line opacity (state.opacity = { natural: number,
- * bikepark: number, ... }) to the map by setting `line-opacity` on each
- * group's casing + line layers. A value is applied only when it is a finite
- * number in (0, 1]; missing/invalid values are skipped so the layer keeps
- * its current opacity. Safe to call before the layers exist (skipped), so it
- * works both on initial load and on live slider changes — the same contract
- * as applyOverlayVisibility.
+ * Applies per-group opacity (state.opacity = { natural: number, bikepark:
+ * number, ... }) to the map. Each group's line layers take `line-opacity` and
+ * its trail-name label (a `symbol` layer) takes `text-opacity`, so the opacity
+ * slider fades the line AND its name together. A value is applied only when it
+ * is a finite number in (0, 1]; missing/invalid values are skipped so the
+ * layer keeps its current opacity. Safe to call before the layers exist
+ * (skipped), so it works both on initial load and on live slider changes —
+ * the same contract as applyOverlayVisibility.
  */
 export function applyOverlayOpacity(map, state) {
   for (const g of OVERLAY_GROUPS) {
@@ -339,9 +442,16 @@ export function applyOverlayOpacity(map, state) {
       continue;
     }
     for (const id of g.layerIds) {
-      if (map && typeof map.getLayer === "function" && typeof map.setPaintProperty === "function" && map.getLayer(id)) {
-        map.setPaintProperty(id, "line-opacity", opacity);
+      if (!map || typeof map.getLayer !== "function" || typeof map.setPaintProperty !== "function") {
+        continue;
       }
+      const layer = map.getLayer(id);
+      if (!layer) continue;
+      // line-opacity is invalid on a symbol layer (and would throw); the name
+      // label fades via text-opacity. Any other layer type is left untouched.
+      const prop =
+        layer.type === "line" ? "line-opacity" : layer.type === "symbol" ? "text-opacity" : null;
+      if (prop) map.setPaintProperty(id, prop, opacity);
     }
   }
 }
