@@ -170,3 +170,16 @@ a { color: #1565c0; }
 .mtb-reimport-msg.error { color: #b71c1c; }
 .mtb-reimport-msg.success { color: #2e7d32; }
 .mtb-reimport-msg.info { color: #1565c0; }
+
+/* Shareable-location dot (web/src/MapView.jsx): the single pinned marker a
+   click places. MapLibre anchors a custom element's CENTER on the lng/lat
+   (anchor "center"), so no offset is needed. Brand green (the same #43a047
+   as the progress bar / form accents) with a white ring + shadow so it reads
+   against any basemap tile. Clicking it removes the dot + the URL hash. */
+.mtb-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #43a047;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  cursor: pointer;
+}

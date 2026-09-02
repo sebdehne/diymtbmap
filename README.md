@@ -39,9 +39,13 @@ builds [OpenMapTiles](https://openmaptiles.org/) vector tiles with
   are computed client-side in the browser by `maplibre-contour` from the same
    `dem` tiles, so there is no separate contour tileset. The tileset is built by
    a standalone converter (`tools/dem-to-raster-tiles-converter/`), not the container; without the artifact the
-  Elevation section is simply absent and the map is unchanged.
+   Elevation section is simply absent and the map is unchanged.
+- **Shareable locations** — a click (not a drag) places a dot and writes the
+   location + zoom into the URL as an OSM-style `#zoom/lat/lon` hash (e.g.
+   `#12.5/60.41210/5.32130`). Opening the link lands on that spot at that
+   zoom with the dot placed; clicking the dot removes it.
 
----
+ ---
 
 ## How to build and run
 

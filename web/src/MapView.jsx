@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Map, NavigationControl, ScaleControl, GeolocateControl, FullscreenControl, addProtocol } from "maplibre-gl";
+import { Map, NavigationControl, ScaleControl, GeolocateControl, FullscreenControl, Marker, addProtocol } from "maplibre-gl";
 // maplibre-contour's default export (the mlcontour namespace with DemSource).
 // It is a browser-only bundler entry (Vite resolves the `module` condition), so
 // it is imported here in the web bundle — never from the Node test suite.
@@ -26,6 +26,7 @@ import { makeInfoControl } from "./components/InfoControl.jsx";
 import { makeLayerControl } from "./components/LayerControl.jsx";
 import { readLayersState } from "./layers-state.js";
 import { DEM_SOURCE, applyTerrain } from "../../shared/terrain.js";
+import { parseViewHash, formatViewHash } from "../../shared/view-state.js";
 
 // A failed style load (style.json / base tiles) is fatal. But a failure to
 // decode an optional dem raster tile — the native raster-dem hillshade, or the
@@ -60,24 +61,30 @@ export default function MapView({ status }) {
   const hasDem = dem !== undefined;
   const demSource = dem?.source ?? DEM_SOURCE;
 
-  // Initial view (workstream D): prefer the auto-detected center/bounds the
-  // pipeline read from the tileset (so any country's extract opens on
-  // itself); fall back to the default (mainland Norway) extent.
+  // Initial view: a shareable location hash (#zoom/lat/lon) in the URL wins —
+  // it restores the pinned dot + zoom (the "share this location" roundtrip,
+  // shared/view-state.js). Without one, prefer the auto-detected
+  // center/bounds the pipeline read from the tileset (so any country's
+  // extract opens on itself); fall back to the default (mainland Norway)
+  // extent.
+  const urlView = parseViewHash(location.href);
   const statusCenter = status?.center;
   const statusBounds = status?.bounds;
   const initial =
-    statusCenter && Array.isArray(statusCenter) && statusCenter.length === 3
-      ? { center: [statusCenter[0], statusCenter[1]], zoom: statusCenter[2] }
-      : {
-          bounds:
-            statusBounds && Array.isArray(statusBounds) && statusBounds.length === 4
-              ? [
-                  [statusBounds[0], statusBounds[1]],
-                  [statusBounds[2], statusBounds[3]],
-                ]
-              : DEFAULT_BOUNDS,
-          fitBoundsOptions: { padding: 24, maxZoom: 6.5 },
-        };
+    urlView
+      ? { center: [urlView.lng, urlView.lat], zoom: urlView.zoom }
+      : statusCenter && Array.isArray(statusCenter) && statusCenter.length === 3
+        ? { center: [statusCenter[0], statusCenter[1]], zoom: statusCenter[2] }
+        : {
+            bounds:
+              statusBounds && Array.isArray(statusBounds) && statusBounds.length === 4
+                ? [
+                    [statusBounds[0], statusBounds[1]],
+                    [statusBounds[2], statusBounds[3]],
+                  ]
+                : DEFAULT_BOUNDS,
+            fitBoundsOptions: { padding: 24, maxZoom: 6.5 },
+          };
 
   useEffect(() => {
     const m = new Map({
@@ -99,6 +106,71 @@ export default function MapView({ status }) {
     });
     // Debug hook (console / CDP): inspect map state, force zooms, read tiles.
     window.__map = m;
+
+    // Shareable location: a single pinned dot (the "dot" the visitor can
+    // share). A click — click-and-release, not a drag: MapLibre's `click`
+    // event already excludes drags — places/moves it and writes the OSM-style
+    // #zoom/lat/lon hash. The dot IS the shared location (shared/view-state.js):
+    // panning leaves the hash alone, and `zoomend` refreshes only its zoom
+    // token, so a copied link always carries the latest zoom. Clicking the dot
+    // itself removes it and clears the hash (the dot-click vs map-click
+    // disambiguation is handled below, since MapLibre's Marker has no
+    // captureClicks).
+    const dotEl = document.createElement("div");
+    dotEl.className = "mtb-dot";
+    // MapLibre's Marker has no public getMap(), so track placement locally.
+    const marker = new Marker({ element: dotEl });
+    let dotOnMap = false;
+    const attachDot = () => {
+      if (!dotOnMap) {
+        marker.addTo(m);
+        dotOnMap = true;
+      }
+    };
+    let pinned = urlView;
+    if (pinned) {
+      marker.setLngLat(pinned);
+      attachDot();
+    }
+
+    // Best-effort URL write (private-mode edge cases must not break the map):
+    // the dot and the view still work without it.
+    const setHash = (view) => {
+      const hash = view ? formatViewHash(view) : "";
+      if (hash === null) return; // invalid location — leave the URL untouched
+      try {
+        history.replaceState(null, "", location.pathname + location.search + hash);
+      } catch {
+        // Ignore — sharing is a convenience, not a requirement.
+      }
+    };
+    const placeDot = (lngLat) => {
+      pinned = { lng: lngLat.lng, lat: lngLat.lat };
+      marker.setLngLat(pinned);
+      attachDot();
+      setHash({ ...pinned, zoom: m.getZoom() });
+    };
+    // MapLibre's Marker has no captureClicks: a dot click still bubbles to
+    // the canvas container and fires the map `click`, which would re-place the
+    // dot we just removed. Stop it at the target (MapLibre binds its click
+    // handler on the container, bubble phase) and also ignore dot-originated
+    // clicks in the map handler itself — the same `originalEvent.target`
+    // check MapLibre uses for marker popups.
+    m.on("click", (e) => {
+      const t = e.originalEvent?.target;
+      if (t && (t === dotEl || dotEl.contains(t))) return;
+      placeDot(e.lngLat);
+    });
+    dotEl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      marker.remove();
+      dotOnMap = false;
+      pinned = null;
+      setHash(null);
+    });
+    m.on("zoomend", () => {
+      if (pinned) setHash({ ...pinned, zoom: m.getZoom() });
+    });
 
     // Workstream B: the map controls.
     m.addControl(new NavigationControl(), "top-right");
@@ -202,6 +274,13 @@ export default function MapView({ status }) {
 
     return () => {
       window.__map = undefined;
+      // The marker element (and its dot-click listener) lives in this effect
+      // closure; remove it so a StrictMode remount (or a source/dem-driven
+      // rebuild) starts from the URL again — never from a stale dot.
+      if (dotOnMap) {
+        marker.remove();
+        dotOnMap = false;
+      }
       m.remove();
     };
     // The map is rebuilt only if the overlay source/minzoom or the presence of

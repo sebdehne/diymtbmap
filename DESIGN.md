@@ -400,6 +400,60 @@ The source id follows `DEM_MBTILES_FILE` end-to-end (Martin derives it from the
 file name), so a custom artifact name works as long as `martin.yaml` and the env
 var agree.
 
+### Shareable location (dot + URL)
+
+The map pins and shares a single location. A click — a click-and-release;
+MapLibre's `click` event already excludes drags — places ONE dot at the point
+and writes the location + zoom into the URL as an OSM-style location hash:
+
+```
+#<zoom>/<lat>/<lng>       e.g. #12.5/60.41210/5.32130
+```
+
+A recipient opening such a URL gets the map centered on the dot at that zoom,
+dot already placed. Clicking the dot itself removes it and clears the hash.
+
+**Why a hash, not query params** — the app is basePath-aware (it also runs
+under a sub-path like `/mtb/`), and a hash never reaches the server or its
+routes. It is also the format OSM and most tile maps already use, so a shared
+link reads familiar.
+
+**Semantics — the dot IS the shared location.** After pinning, panning does
+not change the hash; `zoomend` rewrites ONLY the zoom token, so a copied link
+always carries the latest zoom. The location is not "the current view" — on
+load the view follows the location, never the other way around.
+
+**Precision + validation** (`shared/view-state.js`, pure + tested in
+`test/view-state.test.ts`):
+
+- `formatViewHash({lng, lat, zoom})` → `"#12.5/60.41210/5.32130" | null` —
+  rounds lat/lng to 5 decimal places (~1.1 m at the equator, plenty for
+  pointing at a trail) and zoom to 2 (a fractional zoom like 12.5 must
+  survive the roundtrip).
+- `parseViewHash(hashOrUrl)` → `{lng, lat, zoom} | null` — accepts a bare hash
+  or a full URL; requires exactly 3 tokens, NO empty/blank tokens (`Number("")
+  === 0` in JS, so an empty token would otherwise turn a malformed link into a
+  place on the equator), and in-range values: lat ∈ [-90, 90], lng ∈
+  [-180, 180], zoom ∈ [0, `VIEW_MAX_ZOOM` = 22, mirroring the map's
+  `maxZoom`).
+- An invalid hash is **ignored** — the map falls back to the usual initial
+  view (status center/bounds). A bad shared link must never crash the map.
+
+**Wiring** (`web/src/MapView.jsx`):
+
+- The initial view prefers `parseViewHash(location.href)` over the status
+  center/bounds.
+- A single MapLibre `Marker` with a custom `div.mtb-dot` element (a 14 px
+  brand-green circle, `web/src/styles.css`) and `anchor: "center"` (a dot, not
+  a pin). Default `captureClicks: true` means a dot click never re-fires the
+  map `click` — so clicking the dot is a removal, never a re-place.
+- URL writes are `history.replaceState` (best-effort, try/catch — a
+  private-mode edge case must not break the map) and happen on dot placement
+  (with the current zoom) and on `zoomend` (dot unchanged, zoom refreshed).
+- The marker + its listener live in the map effect's closure and are removed
+  in its cleanup: a StrictMode remount or a source/dem-driven rebuild
+  re-initializes from the URL — never from a stale dot.
+
 ### Project layout
 
 ```
