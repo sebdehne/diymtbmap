@@ -75,6 +75,10 @@ test("elevation: contour line layer is a `line` on the contour source, styled by
   assert.equal(spec.type, "line");
   assert.equal(spec.source, CONTOUR_SOURCE_ID);
   assert.equal(spec["source-layer"], CONTOUR_LAYER);
+  // The 0 m (and below-sea-level) isoline is dropped: only elevation > 0 is kept.
+  // maplibre-contour tags the 0 m line as a major (index) line, so without this
+  // it would render bold + labeled "0 m" right along the coast.
+  assert.deepEqual(spec.filter, [">", ["get", ELEVATION_KEY], 0]);
   // Width + color are driven by the level property (1 = major, 0 = minor).
   // line-width = ["match", ["get","level"], 1, 1.25, 0.5] -> major (level 1) is
   // bolder/wider (1.25) than minor (0.5, the match default).
@@ -90,8 +94,13 @@ test("elevation: label layer is a `symbol` on the major lines, text = elevation 
   assert.equal(spec.type, "symbol");
   assert.equal(spec.source, CONTOUR_SOURCE_ID);
   assert.equal(spec["source-layer"], CONTOUR_LAYER);
-  // Only major lines (level > 0) get labels.
-  assert.deepEqual(spec.filter, [">", ["get", LEVEL_KEY], 0]);
+  // Only major lines (level > 0) get labels, and the 0 m line is excluded too
+  // (elevation > 0) so no "0 m" label sits along the coast.
+  assert.deepEqual(spec.filter, [
+    "all",
+    [">", ["get", LEVEL_KEY], 0],
+    [">", ["get", ELEVATION_KEY], 0],
+  ]);
   assert.equal(spec.layout["symbol-placement"], "line");
   assert.deepEqual(spec.layout["text-font"], CONTOUR_LABEL_FONT);
   // The label text is the integer elevation followed by " m".

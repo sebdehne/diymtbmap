@@ -115,6 +115,11 @@ export function hillshadeLayerSpec(source) {
  * are driven by the maplibre-contour `level` property: major (level 1) is bolder
  * and wider than minor (level 0). `source` is the contour vector source id
  * (CONTOUR_SOURCE_ID by default); MapView passes the id it actually added.
+ *
+ * The filter drops the 0 m isoline and any below-sea-level line (elevation > 0
+ * only). maplibre-contour classifies the 0 m line as a major (index) line — 0 is
+ * a multiple of every interval — so it would otherwise render as a bold line
+ * with a "0 m" label right along the coast (the dem's sea/nodata fill is 0 m).
  */
 export function contourLineSpec(source = CONTOUR_SOURCE_ID) {
   return {
@@ -122,6 +127,7 @@ export function contourLineSpec(source = CONTOUR_SOURCE_ID) {
     type: "line",
     source,
     "source-layer": CONTOUR_LAYER,
+    filter: [">", ["get", ELEVATION_KEY], 0],
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
       "line-color": [
@@ -139,7 +145,8 @@ export function contourLineSpec(source = CONTOUR_SOURCE_ID) {
 /**
  * The elevation label layer spec: a `symbol` layer placed along the lines,
  * showing each major line's elevation in meters (e.g. "123 m"). Minor lines
- * (level 0) are excluded via the filter. `source` defaults to CONTOUR_SOURCE_ID.
+ * (level 0) are excluded via the filter, as is the 0 m line (elevation > 0 only)
+ * so no "0 m" label sits along the coast. `source` defaults to CONTOUR_SOURCE_ID.
  *
  * The label text is `round` + `to-string` (NOT `number-format`): the
  * elevation is already a whole number of meters, and `number-format` would
@@ -158,7 +165,7 @@ export function contourLabelSpec(source = CONTOUR_SOURCE_ID) {
     type: "symbol",
     source,
     "source-layer": CONTOUR_LAYER,
-    filter: [">", ["get", LEVEL_KEY], 0],
+    filter: ["all", [">", ["get", LEVEL_KEY], 0], [">", ["get", ELEVATION_KEY], 0]],
     layout: {
       "symbol-placement": "line",
       "symbol-spacing": 320,
